@@ -44,7 +44,12 @@ def main():
     ap.add_argument("--overwrite", required=False, type=bool, default=True)
     ap.add_argument("--overwrite_checkpoint", required=False, type=bool, default=False)
     ap.add_argument("--nominal", type=float)
-    ap.add_argument("--vision_type", required=False, choices=["opencv", "vlm_gemini"], default="opencv")
+    ap.add_argument(
+        "--vision_type",
+        required=False,
+        choices=["opencv", "vlm_gemini", "vlm_openai", "vlm_anthropic"],
+        default="opencv",
+    )
     ap.add_argument("--policy_name", type = str, default = "act")
     ap.add_argument("--threshold", type = float, default = 0.5)
     ap.add_argument("--train-baseline", type=bool, default=False)

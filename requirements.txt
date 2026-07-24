@@ -3,6 +3,7 @@ opencv_python
 numpy
 pandas
 google-generativeai
+openai
 pydantic
 streamlit
 plotly

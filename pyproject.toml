@@ -9,6 +9,7 @@ dependencies = [
     "numpy",
     "pandas",
     "google-generativeai",
+    "openai",
     "pydantic",
     "streamlit",
     "plotly",
