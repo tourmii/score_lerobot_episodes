@@ -1,0 +1,165 @@
+/* Shared look for the signal charts and everything built around them.
+ * Inlined into the standalone episode pages and served to the web app, so a
+ * page saved to disk and the live app are visually the same thing.
+ *
+ * Dark first: this is a tool for staring at dark video frames and thin traces,
+ * and a bright page next to a 480p ego-view washes both out.  The light variant
+ * is kept for anyone who wants it.
+ */
+:root {
+  --bg: #0e1219;
+  --bg-2: #141a24;
+  --fg: #e6e9ef;
+  --muted: #8b93a7;
+  --line: #222b3a;
+  --line-soft: #1a2230;
+  --panel: #141a24;
+  --panel-2: #1b2331;
+  --accent: #22d3ee;
+  --accent-dim: #0e7490;
+  --ok: #4ade80;
+  --warn: #fbbf24;
+  --bad: #f87171;
+  --radius: 10px;
+  color-scheme: dark;
+}
+/* Light is opt-in, not system-driven: this tool is read against dark video
+   frames and thin traces, and a page that flips to white because of an OS
+   setting washes both out.  The app's theme button sets data-theme. */
+:root[data-theme="light"] {
+  --bg: #ffffff;
+  --bg-2: #f7f8fa;
+  --fg: #16181d;
+  --muted: #6b7280;
+  --line: #e3e6ea;
+  --line-soft: #eef1f5;
+  --panel: #f7f8fa;
+  --panel-2: #eef1f5;
+  --accent: #0e7490;
+  --accent-dim: #67e8f9;
+  --ok: #1a7f37;
+  --warn: #b45309;
+  --bad: #b42318;
+  color-scheme: light;
+}
+
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font: 13.5px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+h1 { font-size: 18px; margin: 0; font-weight: 600; letter-spacing: -0.01em; }
+h2 { font-size: 11px; text-transform: uppercase; letter-spacing: .08em;
+     color: var(--muted); margin: 0 0 9px; font-weight: 600; }
+
+.card {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 13px 15px;
+}
+.sub { color: var(--muted); font-size: 12.5px; }
+.mono { font-variant-numeric: tabular-nums;
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+
+.badge {
+  display: inline-block; padding: 2px 9px; border-radius: 999px;
+  font-size: 11px; font-weight: 600; border: 1px solid currentColor;
+  text-transform: uppercase; letter-spacing: .05em;
+}
+.badge.accept { color: var(--ok); }
+.badge.review { color: var(--warn); }
+.badge.reject { color: var(--bad); }
+
+table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+th, td { text-align: left; padding: 5px 7px; border-bottom: 1px solid var(--line-soft); }
+th { color: var(--muted); font-weight: 600; white-space: nowrap; }
+td.v, th.v { text-align: right; font-variant-numeric: tabular-nums; }
+td.u { color: var(--muted); width: 100px; }
+.scrollx { overflow-x: auto; }
+
+/* --- score bars --- */
+.families { display: grid; gap: 7px; }
+.fam { display: grid; grid-template-columns: 92px 1fr 42px; align-items: center; gap: 9px;
+       font-size: 12.5px; }
+.bar { height: 6px; background: var(--line); border-radius: 4px; overflow: hidden; }
+.bar > i { display: block; height: 100%; background: var(--accent); transition: width .18s; }
+.bar.low > i { background: var(--bad); }
+.bar.mid > i { background: var(--warn); }
+.num { text-align: right; font-variant-numeric: tabular-nums; color: var(--muted); }
+
+/* --- flags --- */
+.flags { display: flex; flex-wrap: wrap; gap: 6px; }
+.flag {
+  font-size: 11.5px; padding: 2px 8px; border-radius: 6px;
+  background: color-mix(in srgb, var(--bad) 16%, transparent); color: var(--bad);
+}
+.flag.soft {
+  background: color-mix(in srgb, var(--warn) 16%, transparent); color: var(--warn);
+}
+
+/* --- charts ---
+   One card per signal.  Nine traces stacked in a single plot give each of them
+   the same sliver of a shared axis and none of them enough; separate cards let
+   every trace keep its own y-scale, its own label and its own live value. */
+.chart-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  gap: 10px;
+}
+.chart-card {
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--bg-2);
+  padding: 8px 10px 5px;
+  min-width: 0;
+}
+.chart-card.is-hidden { display: none; }
+.chart-card.combined { grid-column: 1 / -1; }
+.chart-card header {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  margin-bottom: 4px;
+  font-size: 12px;
+  min-width: 0;
+}
+.chart-card header .swatch { align-self: center; flex: none; }
+.chart-card .name {
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.chart-card .unit { color: var(--muted); font-size: 10.5px; white-space: nowrap; }
+.chart-card .value {
+  margin-left: auto;
+  font-variant-numeric: tabular-nums;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  font-weight: 600;
+  flex: none;
+}
+.chart-card canvas { width: 100%; display: block; cursor: crosshair; touch-action: none; }
+
+.legend { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 9px; font-size: 11.5px; }
+.legend-chip {
+  display: inline-flex; align-items: center; gap: 5px;
+  padding: 2px 8px; border-radius: 999px; cursor: pointer;
+  border: 1px solid var(--line); background: var(--panel-2); color: var(--fg);
+  font: inherit; line-height: 1.6;
+}
+.legend-chip:hover { border-color: var(--accent); }
+.legend-chip.off { opacity: .35; }
+.legend-static { display: inline-flex; align-items: center; gap: 5px;
+                 padding: 2px 8px; color: var(--muted); }
+.swatch { display: inline-block; width: 9px; height: 9px; border-radius: 2px; }
+.swatch-contact { background: rgba(248,113,113,.55); }
+.swatch-idle { background: rgba(139,147,167,.35); }
+.readout { color: var(--muted); font-size: 12px; }
+.hint { color: var(--muted); font-size: 11.5px; }

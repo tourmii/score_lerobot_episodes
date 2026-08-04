@@ -1,26 +1,47 @@
 [project]
 name = "score-lerobot-episodes"
-version = "0.1.0"
-description = "Utilities for scoring LeRobot episodes"
+version = "0.2.0"
+description = "Measure, score and review LeRobot episode quality"
 requires-python = ">=3.10"
+# The metrics layer needs only numpy/pandas/opencv/pyarrow; everything else
+# belongs to an optional extra so a measurement-only run stays light.
 dependencies = [
-    "lerobot",
-    "opencv-python",
     "numpy",
     "pandas",
-    "google-generativeai",
+    "opencv-python",
+    "pyarrow",
+]
+
+[project.optional-dependencies]
+# Web app: `python -m app`
+app = [
+    "fastapi>=0.110",
+    "uvicorn>=0.27",
+    "pydantic>=2",
+]
+# Semantic filter: task-success judging through a vLLM OpenAI-compatible server
+semantic = [
     "openai",
-    "pydantic",
+]
+# The pre-2.0 HuggingFace/Gemini scoring path and the Streamlit dashboard that
+# the web app replaces.
+legacy = [
+    "lerobot",
+    "google-generativeai",
     "streamlit",
     "plotly",
     "python-dotenv",
     "uniplot",
-    "pyarrow",
     "ffmpeg-python>=0.2.0",
     "scipy>=1.15.3",
-    "pytest>=9.0.2",
     "matplotlib>=3.10.8",
 ]
+dev = [
+    "pytest>=8",
+]
+
+[project.scripts]
+measure-dataset = "score_lerobot_episodes.metrics.cli:main"
 
 [build-system]
 requires = ["setuptools>=61.0"]
@@ -28,3 +49,7 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+# chart.js / theme.css are shared by the app and the standalone HTML export.
+"score_lerobot_episodes.metrics" = ["assets/*"]

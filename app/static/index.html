@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Episode quality</title>
+<link rel="stylesheet" href="/assets/theme.css">
+<link rel="stylesheet" href="/static/app.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><text y='26' font-size='26'>🤖</text></svg>">
+</head>
+<body>
+
+<div class="shell">
+  <aside class="rail">
+
+    <div class="rail-top">
+      <div class="brand-row">
+        <a href="#/" class="brand">Episode&nbsp;quality</a>
+        <button class="theme-btn" id="themeBtn" title="light / dark">◐</button>
+      </div>
+      <select id="datasetPicker" title="active dataset"></select>
+    </div>
+
+    <dl class="stats" id="stats"></dl>
+
+    <div class="rail-list" id="episodeRail">
+      <h2>episodes</h2>
+      <div class="ep-filter" id="epFilter"></div>
+      <ul class="episode-list" id="episodeList"></ul>
+    </div>
+
+    <details class="rail-settings" id="settings">
+      <summary><span>settings</span><span class="sub" id="settingsHint"></span></summary>
+      <div class="settings-body">
+
+        <section>
+          <h2>add a dataset</h2>
+          <form class="add-form" id="addForm">
+            <input type="text" id="addPath" placeholder="path to a LeRobot folder" required>
+            <button type="submit">add</button>
+          </form>
+          <div class="hint" id="addError"></div>
+        </section>
+
+        <section id="analyzeBlock" hidden>
+          <h2>measure</h2>
+          <label class="row"><input type="checkbox" id="useVideo" checked>
+            <span>include video <span class="sub">(slowest)</span></span></label>
+          <label class="row"><span>workers</span>
+            <input type="number" id="workers" min="1" max="32" value="4"></label>
+          <button class="primary" id="analyzeBtn">run measurement</button>
+          <div class="progress" id="analyzeProgress" hidden>
+            <div class="progress-bar"><i></i></div>
+            <div class="hint" id="analyzeMsg"></div>
+          </div>
+        </section>
+
+        <section id="scoreBlock" hidden>
+          <h2>decision</h2>
+          <label class="row"><span>rule</span>
+            <select id="mode">
+              <option value="gate">every family must pass</option>
+              <option value="weighted">weighted mean must pass</option>
+              <option value="rules">limits per quantity</option>
+            </select></label>
+          <label class="row"><span>combine</span>
+            <select id="aggregate">
+              <option value="geometric">geometric — a collapse cannot hide</option>
+              <option value="arithmetic">arithmetic — fully compensatory</option>
+            </select></label>
+          <label class="row slider" id="thresholdRow"><span>accept ≥</span>
+            <input type="range" id="threshold" min="0" max="1" step="0.01" value="0.35">
+            <b class="mono" id="thresholdValue">0.35</b></label>
+          <div class="hint" id="modeNote"></div>
+
+          <h2 style="margin-top:14px">weights <span class="sub" id="weightsNote"></span></h2>
+          <div id="weightSliders"></div>
+
+          <div class="row two">
+            <label><span class="sub">p-low</span><input type="number" id="loPct" value="5" min="0" max="49" step="1"></label>
+            <label><span class="sub">p-high</span><input type="number" id="hiPct" value="95" min="51" max="100" step="1"></label>
+          </div>
+          <button id="refitBtn">refit ranges to this dataset</button>
+          <div class="hint" id="calibNote"></div>
+        </section>
+
+        <section id="semanticBlock" hidden>
+          <h2>semantic filter</h2>
+          <div class="hint">Judges task success from the video with a
+            vision-language model — the one thing kinematics cannot see.</div>
+          <input type="text" id="semanticUrl" placeholder="http://localhost:8000/v1">
+          <input type="text" id="semanticModel" placeholder="nvidia/Cosmos-Reason2-8B">
+          <button id="semanticBtn">judge every episode</button>
+          <div class="progress" id="semanticProgress" hidden>
+            <div class="progress-bar"><i></i></div>
+            <div class="hint" id="semanticMsg"></div>
+          </div>
+          <div class="hint" id="semanticError"></div>
+        </section>
+
+        <section id="exportBlock" hidden>
+          <h2>export</h2>
+          <a id="exportCsv" download>measurements + scores (csv)</a>
+          <a id="exportJson" download>accepted episode list (json)</a>
+          <div class="hint" id="stateDir"></div>
+        </section>
+
+      </div>
+    </details>
+  </aside>
+
+  <main id="view"><div class="empty">Loading…</div></main>
+</div>
+
+<script src="/assets/chart.js"></script>
+<script src="/static/app.js"></script>
+</body>
+</html>

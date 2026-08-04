@@ -88,6 +88,55 @@ def get_video_info_v30(df_episodes, episode_idx, camera_key):
     }
 
 
+def resolve_action_key(features: dict, state_key: str = "observation.state") -> str:
+    """Find the action column, tolerating non-standard datasets.
+
+    Standard LeRobot datasets expose a single ``action`` feature.  Some datasets
+    instead namespace actions (e.g. ``action.wbc``, ``action.motion_token``).
+    The path scorers subtract actions from states elementwise, so we prefer the
+    ``action.*`` variant whose dimension matches ``observation.state``.
+    """
+    if "action" in features:
+        return "action"
+
+    action_keys = [k for k in features if k == "action" or k.startswith("action.")]
+    if not action_keys:
+        raise KeyError(
+            f"No action feature found in dataset. Available features: {sorted(features)}"
+        )
+
+    def _dim(key):
+        shape = features[key].get("shape")
+        return shape[-1] if shape else None
+
+    state_dim = _dim(state_key) if state_key in features else None
+    if state_dim is not None:
+        for key in action_keys:
+            if _dim(key) == state_dim:
+                return key
+
+    return action_keys[0]
+
+
+def resolve_task(tasks, task_idx: int) -> str:
+    """Look up a task string by index, across lerobot metadata representations.
+
+    v2.1-era lerobot exposes `meta.tasks` as a {task_index: task} dict, while
+    v3.0 exposes a DataFrame indexed by the task string with a `task_index` column.
+    """
+    if isinstance(tasks, dict):
+        return tasks[task_idx]
+
+    # pandas DataFrame: prefer matching the column over positional indexing, as
+    # row order is not guaranteed to follow task_index.
+    if 'task_index' in getattr(tasks, 'columns', []):
+        matches = tasks.index[tasks['task_index'] == task_idx]
+        if len(matches) > 0:
+            return matches[0]
+
+    return tasks.iloc[task_idx].name
+
+
 def extract_video_segment(video_path, from_timestamp, to_timestamp, output_path=None):
     """
     Extract a segment from a video file using ffmpeg.
@@ -454,6 +503,18 @@ def organize_by_episode(dataset: LeRobotDataset):
     camera_keys = [k for k in dataset.meta.features.keys() if 'observation.images' in k]
     camera_keys_clean = [k.replace('observation.images.', '') for k in camera_keys]
 
+    # Get the row range of each episode from the data itself.  `episode_index`
+    # exists in both versions, whereas the `dataset_from_index`/`dataset_to_index`
+    # metadata columns are v3.0-only.  Rows of an episode are stored
+    # contiguously, so first-row + length gives the range.
+    episode_indices = np.asarray(hf_dataset[:]["episode_index"])
+    episodes, starts, counts = np.unique(episode_indices, return_index=True, return_counts=True)
+    episode_row_ranges = {
+        int(episode): (int(start), int(start) + int(count))
+        for episode, start, count in zip(episodes, starts, counts)
+    }
+    unique_episodes = list(episode_row_ranges)
+
     if version == V21:
         # v2.1: Videos organized as videos/chunk-*/CAMERA/episode_*.mp4
         vid_paths = filter(lambda x: '.mp4' in x, dataset.get_episodes_file_paths())
@@ -477,10 +538,6 @@ def organize_by_episode(dataset: LeRobotDataset):
         # v3.0: Videos organized as videos/CAMERA/chunk-*/file_*.mp4
         # Need to load episodes metadata to find which file each episode is in
         df_episodes = load_episodes_v30(dataset.root)
-
-        # Get unique episode indices from the dataset
-        # NOTE(shreetej): Feels a bit convoluted wrt operations, but not sure how to do it better.
-        unique_episodes = sorted(list(set(np.array(hf_dataset[:]["episode_index"]).tolist())))
 
         # Build video paths for each episode
         for episode_idx in unique_episodes:
@@ -514,19 +571,19 @@ def organize_by_episode(dataset: LeRobotDataset):
 
     # Organize actions and states - same for both versions
     # We don't need to load videos at this step.
+    action_key = resolve_action_key(dataset.meta.features)
+
     for k in camera_keys:
         dataset.meta.features.pop(k, None)
 
     for episode_idx in unique_episodes:
-        ep = dataset.meta.episodes[episode_idx]
-        ep_start = ep["dataset_from_index"]
-        ep_end = ep["dataset_to_index"]
+        ep_start, ep_end = episode_row_ranges[episode_idx]
 
         timestamps = np.array(hf_dataset[ep_start:ep_end]["timestamp"])
         obs_states = np.array(hf_dataset[ep_start:ep_end]["observation.state"])
-        actions = np.array(hf_dataset[ep_start:ep_end]["action"])
-        task_idx = hf_dataset[ep_start]["task_index"].item()
-        task = dataset.meta.tasks.iloc[task_idx].name
+        actions = np.array(hf_dataset[ep_start:ep_end][action_key])
+        task_idx = int(hf_dataset[ep_start]["task_index"])
+        task = resolve_task(dataset.meta.tasks, task_idx)
 
         episode_map[episode_idx]['states'] = [{'q': q, 't': t} for q, t in zip(obs_states, timestamps)]
         episode_map[episode_idx]['actions'] = actions

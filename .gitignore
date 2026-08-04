@@ -16,4 +16,9 @@ outputs/
 output/build/
 *.egg-info/
 dist/
+data/
 *.pyc
+# quality app / report artefacts
+.quality_app/
+quality_report/
+_viz_preview/

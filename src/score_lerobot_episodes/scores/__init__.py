@@ -1,7 +1,15 @@
 import cv2, numpy as np, pathlib
 
-from .visual import VideoSegment, score_visual_clarity, calculate_blur_score, calculate_contrast_score, calculate_darkness_score, calculate_exposure_score
-from .path import score_smoothness, score_path_efficiency, score_idle_velocity, score_collision, score_joint_stability, score_gripper_consistency, score_actuator_saturation, score_sparc
+# The legacy scorers reach into the Gemini-era VLM wrapper, which the vLLM
+# rewrite of `vlm.py` replaced.  Importing them must not take down
+# `scores.humanoid`, which needs nothing beyond numpy/opencv — so the failure is
+# deferred to whoever actually calls `DatasetScorer`.
+try:
+    from .visual import VideoSegment, score_visual_clarity, calculate_blur_score, calculate_contrast_score, calculate_darkness_score, calculate_exposure_score
+    from .path import score_smoothness, score_path_efficiency, score_idle_velocity, score_collision, score_joint_stability, score_gripper_consistency, score_actuator_saturation, score_sparc
+except ImportError as _exc:  # pragma: no cover - depends on optional deps
+    _LEGACY_IMPORT_ERROR = _exc
+    VideoSegment = None
 
 def build_time_stats(states):
     """

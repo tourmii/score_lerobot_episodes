@@ -103,6 +103,33 @@ Use this toolkit to:
 
 ---
 
+## 🤖 Humanoid quality pipeline
+
+For teleoperated humanoid datasets (Unitree G1 and similar) there is a second,
+newer pipeline that measures episodes in physical units first and scores them
+second, plus a web app for reviewing the results next to the recordings.
+
+```bash
+pip install -e ".[app]"
+
+# web app: measure a dataset, then watch each episode beside its signals
+python -m app                       # http://127.0.0.1:8000
+
+# batch: measurements, scores and standalone HTML pages
+python scripts/measure_dataset.py pickup_20260628_150622 --html 15
+```
+
+| document | what it covers |
+|---|---|
+| [`docs/architecture.md`](docs/architecture.md) | how the layers fit together and why |
+| [`docs/app.md`](docs/app.md) | the web app: API, views, workflow |
+| [`docs/metrics_reference.md`](docs/metrics_reference.md) | every metric's formula and contract |
+
+The Streamlit dashboard (`ui.py`) is superseded by the web app and kept only for
+the legacy scoring path.
+
+---
+
 ## 🚀 Quick Start
 
 Score a dataset and save results:
