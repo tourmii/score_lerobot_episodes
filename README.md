@@ -1,401 +1,291 @@
-<p align="center">
-  <img src="https://raw.githubusercontent.com/sammyatman/score_lerobot_episodes/refs/heads/main/LeRobotEpisodeScoringToolkit.png" height="350" alt="LeRobotEpisodeScoringToolkit" />
-</p>
-<p align="center">
-  <em>A lightweight toolkit for quantitatively scoring LeRobot episodes.</em>
-</p>
-
-<p align="center">
-  <a href="https://github.com/RoboticsData/score_lerobot_episodes/blob/main/LICENSE"><img alt="License: Apache 2.0" src="https://img.shields.io/badge/License-Apache%202.0-blue.svg"></a>
-  <a href="https://github.com/RoboticsData/score_lerobot_episodes"><img alt="Python 3.8+" src="https://img.shields.io/badge/python-3.8+-blue.svg"></a>
-  <a href="https://github.com/RoboticsData/score_lerobot_episodes/stargazers"><img alt="GitHub stars" src="https://img.shields.io/github/stars/RoboticsData/score_lerobot_episodes"></a>
-</p>
-
-> [!NOTE]
-> The features in this repository are now integrated into [Robotdata Studio](https://studio.robotdata.com).
->
-> - Instant ~20% quality boost with our data capture platform
-> - Seamless integration with your existing LeRobot datasets
-> - Powerful diversity scoring and data sanitization techniques
->
-> [studio.robotdata.com](https://studio.robotdata.com)
-
 # **LeRobot Episode Scoring Toolkit**
 
-A comprehensive toolkit for evaluating and filtering LeRobot episode datasets based on multiple quality dimensions. It combines classic Computer Vision heuristics (blur/exposure tests, kinematic smoothness, collision spikes) with optional Gemini-powered vision-language checks to give each episode a **0–1 score** across multiple quality dimensions.
+A two-stage pipeline for measuring, scoring and filtering teleoperated LeRobot
+episode datasets. Stage 1 filters on **physical parameters** — it measures each
+episode in real units (rad/s², m, Hz, s), fits the distribution to your own
+data, and rejects episodes that fall outside acceptable limits. Stage 2 filters
+on **task semantics** — a Cosmos-Reason vision-language model watches the
+surviving recordings and keeps only the episodes where the task actually
+succeeded. What comes out is a clean LeRobot dataset, plus a web app for
+reviewing every decision next to the video that produced it.
 
 Use this toolkit to:
-- **Automatically score** robot demonstration episodes on visual clarity, motion smoothness, collision detection, and more
-- **Filter** low-quality episodes to improve downstream training performance
-- **Train and compare** baseline vs. filtered dataset models
-- **Visualize** score distributions and identify problematic episodes
+- **Measure** episodes in physical units first, then score them — measurement and
+  scoring are separate, so re-ranking a whole dataset is instant.
+- **Filter** on motion quality *and* task success, catching failures no
+  kinematic metric can see.
+- **Review** each episode with its recording and the signals it was judged on,
+  side by side.
+- **Export** measurements, scores and the accepted-episode list.
+
+## The pipeline
+
+![Data filter pipeline](docs/pipeline.png)
+
+| stage | what happens |
+|---|---|
+| **Input** | LeRobot `.parquet` trajectories + `.mp4` recordings |
+| **Stage 1 — parameter filter** | ① measure physical quantities (validity flags + raw units) → ② fit distributions (p1…p99) → ③ normalize to `[0,1]` → ④ apply limits/thresholds. Also renders the per-episode signal charts. |
+| **Stage 2 — semantic filter** | the stage-1 survivors, plus a JSON task description, go to **Cosmos-Reason** (served over vLLM). Episodes that did not complete the task are discarded; successful ones are kept. |
+| **Output** | a clean LeRobot dataset, and everything integrated into the web app for monitoring and review. |
 
 ## Table of Contents
-- [Features](#features)
 - [Installation](#installation)
 - [Quick Start](#quick-start)
-- [Usage](#usage)
-  - [Command-line Arguments](#command-line-arguments)
-  - [Examples](#examples)
-- [Output Format](#output-format)
+- [Stage 1 — parameter filter](#stage-1--parameter-filter)
+- [Stage 2 — semantic filter](#stage-2--semantic-filter)
+- [The web app](#the-web-app)
+- [Outputs](#outputs)
+- [Documentation](#documentation)
 - [Repository Structure](#repository-structure)
-- [Training and Evaluation](#training-and-evaluation)
-- [Troubleshooting](#troubleshooting)
-- [Contributing](#contributing)
 - [License](#license)
-
----
-
-## ✨ Features
-
-| Dimension                   | Function                                            | What it measures                                             |
-| --------------------------- | ---------------------------------------------------- | ------------------------------------------------------------ |
-| Visual clarity              | `score_visual_clarity`                              | Blur, over/under-exposure, low-light frames                  |
-| Smoothness                  | `score_smoothness`                                  | 2nd derivative of joint angles                              |
-| Path efficiency             | `score_path_efficiency`                             | Ratio of straight-line vs. actual joint-space path           |
-| Collision / spikes          | `score_collision`                                   | Sudden acceleration outliers (proxy for contacts)            |
-| Joint stability (final 2 s) | `score_joint_stability`                             | Stillness at the goal pose                                   |
-| Gripper consistency         | `score_gripper_consistency`                         | Binary "closed vs. holding" agreement                        |
-| Actuator saturation         | `score_actuator_saturation`                         | Difference between commanded actions and achieved states     |
-| Task success (VLM)          | `score_task_success` (via `VLMInterface`)           | Gemini grades whether the desired behaviour happened         |
-| Task success (VLM)          | `score_task_success` (via `VLMInterface`)           | Gemini grades whether the desired behavior happened         |
-| Runtime penalty / outliers  | `score_runtime` + `build_time_stats`, `is_time_outlier` | Episode length vs. nominal / Tukey-IQR / Z-score fences      |
 
 ---
 
 ## ⚙️ Installation
 
 ### Prerequisites
-- Python 3.8 or higher
-- pip package manager
+- Python 3.10 or higher
+- pip (or [uv](https://github.com/astral-sh/uv) for faster installs)
 
-### Setup
-
-1. **Clone the repository**
-   ```bash
-   git clone https://github.com/RoboticsData/score_lerobot_episodes.git
-   cd score_lerobot_episodes
-   ```
-
-2. **Install dependencies**
-   ```bash
-   # Install in editable mode with all dependencies
-   pip install -e .
-   ```
-   
-   Or using uv (faster):
-   ```bash
-   # Install uv if you haven't already
-   pip install uv
-   
-   # Install the package
-   uv pip install -e .
-   ```
-
-3. **Set up API keys (optional)**
-
-   Only required if using VLM-based scoring with Gemini:
-   ```bash
-   export GOOGLE_API_KEY="your-api-key-here"
-   ```
-
-   **Note:** The free tier rate limits of the Gemini API are fairly restrictive and might need to be upgraded depending on episode length. Check [Gemini API rate limits](https://ai.google.dev/gemini-api/docs/rate-limits) for more info.
-
----
-
-## 🤖 Humanoid quality pipeline
-
-For teleoperated humanoid datasets (Unitree G1 and similar) there is a second,
-newer pipeline that measures episodes in physical units first and scores them
-second, plus a web app for reviewing the results next to the recordings.
+The metrics layer needs only `numpy`, `pandas`, `opencv-python` and `pyarrow`.
+Everything else is an optional extra, so a measurement-only run stays light.
 
 ```bash
+git clone https://github.com/RoboticsData/score_lerobot_episodes.git
+cd score_lerobot_episodes
+
+# metrics only (Stage 1 measurement + scoring, batch CLI)
+pip install -e .
+
+# + the web app
 pip install -e ".[app]"
 
-# web app: measure a dataset, then watch each episode beside its signals
-python -m app                       # http://127.0.0.1:8000
-
-# batch: measurements, scores and standalone HTML pages
-python scripts/measure_dataset.py pickup_20260628_150622 --html 15
+# + the semantic filter (Stage 2, talks to a vLLM server)
+pip install -e ".[app,semantic]"
 ```
 
-| document | what it covers |
-|---|---|
-| [`docs/architecture.md`](docs/architecture.md) | how the layers fit together and why |
-| [`docs/app.md`](docs/app.md) | the web app: API, views, workflow |
-| [`docs/metrics_reference.md`](docs/metrics_reference.md) | every metric's formula and contract |
-
-The Streamlit dashboard (`ui.py`) is superseded by the web app and kept only for
-the legacy scoring path.
+`uv pip install -e ".[app,semantic]"` works the same and is faster.
 
 ---
 
 ## 🚀 Quick Start
 
-Score a dataset and save results:
+Point the pipeline at a local dataset folder — the directory that holds `meta/`,
+`data/` and `videos/`.
+
 ```bash
-python score_dataset.py \
-  --repo_id lerobot/aloha_static_pro_pencil \
-  --output ./output/lerobot/aloha_static_pro_pencil \
-  --threshold 0.5
+# Interactive: measure once, then review each episode beside its signals
+pip install -e ".[app]"
+python -m app                                 # http://127.0.0.1:8000
+
+# Batch: measurements, scores and standalone HTML pages for the 15 worst episodes
+python scripts/measure_dataset.py pickup_20260628_150622 --html 15
 ```
 
-This will:
-1. Download and load the dataset from HuggingFace
-2. Score each episode across multiple quality dimensions
-3. Save scores to output path
-4. Filter episodes with aggregate score >= 0.5
-5. Save the filtered dataset to the output directory
+That is Stage 1. To add Stage 2, start a Cosmos-Reason vLLM server (see
+[Stage 2](#stage-2--semantic-filter)) and pass `--semantic`, or run the semantic
+filter from the app.
 
 ---
 
-## 📖 Usage
+## 📏 Stage 1 — parameter filter
 
-### Command-line Arguments
+Stage 1 measures each episode in physical units, fits the acceptable range to
+your own dataset, and turns raw quantities into a `0–1` score and an
+accept/review/reject decision. Measurement is separate from scoring on purpose:
+measuring 90 episodes with video takes minutes, re-scoring them takes
+milliseconds — which is what lets the app re-rank the whole dataset as you drag a
+slider.
 
-#### Required Arguments
-- `--repo_id`: HuggingFace repository ID for the dataset (e.g., `username/dataset-name`)
+### Metric families
 
-#### Optional Arguments
-- `--root`: Local path to dataset root (default: downloads from HuggingFace Hub)
-- `--output`: Output directory for filtered dataset (default: None, no filtering)
-- `--threshold`: Minimum aggregate score to keep episodes (default: 0.5, range: 0.0-1.0)
-- `--nominal`: Expected episode duration in seconds (used for runtime scoring)
-- `--vision_type`: Vision scoring method, choices: `opencv` (default), `vlm_gemini`
-- `--policy_name`: Policy type for training (default: `act`)
-- `--overwrite`: Overwrite existing filtered dataset (default: True)
-- `--overwrite_checkpoint`: Overwrite existing training checkpoints (default: False)
-- `--train-baseline`: Train model on unfiltered dataset (default: False)
-- `--train-filtered`: Train model on filtered dataset (default: False)
-- `--plot`: Display score distribution plots in terminal (default: False)
+Each family targets a specific failure mode across three time scales that no
+single statistic spans (see [`docs/architecture.md`](docs/architecture.md)):
 
-### Examples
+| family | measures | key quantity |
+|---|---|---|
+| smoothness | trajectory *shape* | LDLJ on wrist, arm and body chains |
+| acceleration | trajectory *magnitude* | RMS and p99 per chain |
+| contact | inferred collisions | events/second, 2-of-3 quorum |
+| timing | duration, dead time, regrasps | seconds, fraction, transition count |
+| video | recording quality and integrity | Laplacian variance, decode ratio |
 
-#### 1. Basic scoring (no filtering)
+### Flags come before distributions
+
+Four preconditions are checked before any percentile is computed, and flagged
+episodes are excluded from the calibration sample — a motionless reset recording
+can otherwise score the *best* smoothness in the set and skew every threshold:
+
+| flag | condition |
+|---|---|
+| `degenerate` | wrist path < 0.30 m (motionless) |
+| `grasp_incomplete` | < 2 hand transitions (the grasp cycle never happened) |
+| `video_unreadable` / `video_truncated` | decode fails, or < 95 % of declared frames present |
+| `self_collision_suspect` / `video_frozen` | flagged for review, not auto-rejected |
+
+### Batch CLI
+
 ```bash
-python score_dataset.py --repo_id username/my-robot-dataset
+# measurements and scores only, no video decoding (fastest)
+python scripts/measure_dataset.py pickup_20260628_150622 --no-video
+
+# full run with the synchronised HTML visualisation for the 15 worst episodes
+python scripts/measure_dataset.py pickup_20260628_150622 --html 15
 ```
 
-#### 2. Score and filter dataset
-```bash
-python score_dataset.py \
-  --repo_id username/my-robot-dataset \
-  --output ./output/username/my-robot-dataset \
-  --threshold 0.6
-```
+Useful flags (`--help` for the full list):
 
-#### 3. Score with VLM-based vision analysis
-```bash
-export GOOGLE_API_KEY="your-key"
-python score_dataset.py \
-  --repo_id username/my-robot-dataset \
-  --vision_type vlm_gemini \
-  --output ./filtered_data
-```
+| flag | purpose |
+|---|---|
+| `--out-dir DIR` | where to write outputs (default `quality_report`) |
+| `--camera KEY` | camera to score (default: first `observation.images.*`) |
+| `--no-video` | skip the video family (much faster first pass) |
+| `--workers N` | parallel episodes |
+| `--lo-pct` / `--hi-pct` | percentiles bounding each fitted range (default 5 / 95) |
+| `--mode` | decision rule: `gate`, `rules` (per-unit limits) or `weighted` |
+| `--threshold` | accept threshold for `gate` / `weighted` (default 0.35) |
+| `--html [N]` | render the synchronised visualisation for the N worst episodes |
 
-#### 4. Score, filter, and train both baseline and filtered models
-```bash
-python score_dataset.py \
-  --repo_id username/my-robot-dataset \
-  --output ./output/username/my-robot-dataset \
-  --threshold 0.5 \
-  --train-baseline True \
-  --train-filtered True \
-  --policy_name act
-```
-
-#### 5. Visualize distributions
-```bash
-python score_dataset.py \
-  --repo_id username/my-robot-dataset \
-  --threshold 0.7 \
-  --plot True
-```
-
-#### 6. Use local dataset instead of downloading
-```bash
-python score_dataset.py \
-  --repo_id username/my-robot-dataset \
-  --root /path/to/local/dataset \
-  --output ./filtered_output
-```
+An equivalent console entry point is installed as `measure-dataset`.
 
 ---
 
-## 📁 Output Format
+## 🧠 Stage 2 — semantic filter
 
-### JSON Scores File
-Saved to `results/{repo_id}_scores.json`:
-```json
-[
-  {
-    "episode_id": 0,
-    "camera_type": "camera_0",
-    "video_path": "/path/to/video.mp4",
-    "aggregate_score": 0.752,
-    "per_attribute_scores": {
-      "visual_clarity": 0.85,
-      "smoothness": 0.78,
-      "collision": 0.92,
-      "runtime": 0.65
-    }
-  },
-  ...
-]
+The five families answer *how* the robot moved. None can answer *whether the
+task was done* — an episode can be smooth, gentle, prompt and well filmed while
+the object ends up beside the box instead of in it. On the reference dataset the
+kinematic score of the hand-discarded episodes (0.656) is indistinguishable from
+the kept set (0.644); the difference is task failure, which is exactly the gap
+Stage 2 fills.
+
+A **Cosmos-Reason** vision-language model, served over a local vLLM
+OpenAI-compatible endpoint, watches each surviving recording and issues one
+verdict per episode:
+
+- `1.0` — goal reached
+- `0.5` — attempted (object grasped and moved toward the target)
+- `0.0` — not reached
+
+The verdict enters the decision as a **hard gate** (reject at `0.0`, review at
+`0.5`), never as a weighted term — a half-done task is not compensated by a
+smooth trajectory. Verdicts are cached to JSONL keyed by `(video, task)`, so a
+re-run costs nothing and an interrupted run resumes.
+
+### Serve the model
+
+```bash
+uv run vllm serve nvidia/Cosmos-Reason2-2B \
+  --allowed-local-media-path "$(pwd)" \
+  --max-model-len 32768 \
+  --media-io-kwargs '{"video": {"num_frames": 16}}' \
+  --port 8000
 ```
 
-### Console Output
-Displays a formatted table showing scores for each episode:
-```
-Episode scores (0–1 scale)
-─────────────────────────────────────────────────────────────────
-Episode Camera                       visual_clarity  smoothness  collision  runtime  Aggregate  Status
-0       camera_0                              0.850       0.780      0.920    0.650      0.752  GOOD
-1       camera_1                              0.420       0.650      0.710    0.580      0.590  BAD
-...
-─────────────────────────────────────────────────────────────────
-Average aggregate over 20 videos: 0.671
-Percentage of episodes removed: 0.25, total: 5
+(`src/score_lerobot_episodes/script_host_vllm.sh` holds this command.)
+
+### Run the filter
+
+```bash
+python scripts/measure_dataset.py pickup_20260628_150622 \
+  --semantic \
+  --semantic-base-url http://127.0.0.1:8000/v1 \
+  --semantic-model nvidia/Cosmos-Reason2-2B \
+  --task "put the teddy bear in the box"
 ```
 
-### Filtered Dataset
-When using `--output`, a new filtered dataset is created with only episodes scoring above the threshold, maintaining the original LeRobot dataset structure.
+Or run it from the web app once the server is reachable
+(`POST /api/datasets/{id}/semantic`). `COSMOS_BASE_URL` and `COSMOS_MODEL`
+supply the endpoint and model name if you prefer environment variables.
 
 ---
-## 📂 Repository Structure
+
+## 🖥️ The web app
+
+A FastAPI backend and a single-page frontend for measuring a dataset once and
+reviewing it interactively — the recording plays beside the exact signals it was
+judged on, with a shared playhead and contact/idle shading. There is no build
+step and no npm; the frontend is three files under `app/static/`.
+
+```bash
+pip install -e ".[app]"
+python -m app                                    # http://127.0.0.1:8000
+python -m app --port 9000 --reload
+python -m app --dataset ./pickup_20260628_150622 # register at startup
+```
+
+Workflow: add a dataset → run measurement (a cached background job) → review the
+overview → open an episode → tune the decision rule (re-scoring is in-process and
+takes milliseconds) → run the semantic filter → export. Interactive API docs are
+at `/docs`. See [`docs/app.md`](docs/app.md) for the full API and view reference.
+
+---
+
+## 📂 Outputs
+
+- **`quality_report/`** (batch CLI) — `measurements.csv` in physical units,
+  scores, and optional standalone HTML visualisation pages.
+- **`.quality_app/`** (web app) — cached measurements, calibration and semantic
+  verdicts, so a restart never re-measures. Deleting it costs one re-measure.
+- **Exports** — measurements joined with scores as CSV
+  (`GET /api/datasets/{id}/export.csv`), or the accepted-episode list as JSON
+  (`export.json?decision=accept`).
+
+The `measurements.csv` carries raw physical units, so a domain expert can
+disagree with a threshold without re-deriving the metric.
+
+---
+
+## 📚 Documentation
+
+| document | what it covers |
+|---|---|
+| [`docs/architecture.md`](docs/architecture.md) | how the measure → normalize → decide layers fit together, and why they are split |
+| [`docs/app.md`](docs/app.md) | the web app: API, views, workflow, caching |
+
+---
+
+## 📁 Repository Structure
+
 ```
 score_lerobot_episodes/
-├── src/
-│   └── score_lerobot_episodes/  # Installable package
-│       ├── __init__.py
-│       ├── data.py              # Dataset utilities
-│       ├── vlm.py               # Vision-Language Model 
-│       ├── evaluation.py        # Evaluation utilities
-│       ├── corrupt.py           # Data corruption tools 
-│       └── scores/              # Scoring criteria modules
-├── score_dataset.py             # Main scoring script
-├── train.py                     # Training pipeline integration
-├── ui.py                        # Streamlit web interface (if available)
-├── pyproject.toml               # Package configuration and dependencies
-├── requirements.txt             # Python dependencies (legacy)
-├── README.md                    # This file
-├── CONTRIBUTING.md              # Contribution guidelines
-├── LICENSE                      # Apache 2.0 license
-├── .gitignore                   # Git ignore rules
-├── results/                     # Generated score JSON files
-├── output/                      # Filtered datasets
-└── checkpoints/                 # Training checkpoints
+├── src/score_lerobot_episodes/
+│   ├── metrics/              # the Stage 1/2 pipeline
+│   │   ├── signals.py        # load parquet, mask dead channels, differentiate
+│   │   ├── measure.py        # raw physical quantities + flags (no thresholds)
+│   │   ├── normalize.py      # ranges fitted to your data → accept/review/reject
+│   │   ├── semantic.py       # Stage 2: Cosmos-Reason task-success gate
+│   │   ├── visualize.py      # standalone HTML page, burned-in overlay mp4
+│   │   ├── cli.py            # batch entry point (measure-dataset)
+│   │   └── assets/           # chart.js / theme.css shared by app + HTML export
+│   ├── vlm.py                # Cosmos-Reason vLLM client
+│   └── scores/               # legacy single-tier scoring facade
+├── app/                      # FastAPI backend + vanilla-JS SPA (python -m app)
+│   ├── main.py               # routes, video streaming, static mounts
+│   ├── service.py            # registry, jobs, caching, scoring
+│   └── static/               # index.html, app.css, app.js
+├── scripts/
+│   ├── measure_dataset.py    # batch pipeline runner
+│   └── ...
+├── docs/                     # architecture.md, app.md, pipeline.png
+├── pyproject.toml            # package + optional extras (app, semantic, legacy)
+├── LICENSE
+└── README.md
 ```
 
----
-
-## 🤖 Training and Evaluation
-
-The toolkit integrates with LeRobot's training pipeline to compare baseline vs. filtered dataset performance.
-
-### Training Workflow
-
-1. **Baseline Training**: Train on the original unfiltered dataset
-   ```bash
-   python score_dataset.py \
-     --repo_id username/dataset \
-     --train-baseline True
-   ```
-
-2. **Filtered Training**: Train on the quality-filtered dataset
-   ```bash
-   python score_dataset.py \
-     --repo_id username/dataset \
-     --output ./filtered_data \
-     --threshold 0.6 \
-     --train-filtered True
-   ```
-
-3. **Compare Both**: Run both training pipelines in one command
-   ```bash
-   python score_dataset.py \
-     --repo_id username/dataset \
-     --output ./filtered_data \
-     --train-baseline True \
-     --train-filtered True
-   ```
-
-### Training Configuration
-
-- Default policy: ACT (Action Chunking Transformer)
-- Default steps: 10,000
-- Batch size: 4
-- Checkpoints saved to `./checkpoints/{job_name}/`
-- WandB logging enabled by default
-
-You can customize training parameters by modifying `train.py`.
-
----
-
-## 🔧 Troubleshooting
-
-### Common Issues
-
-**1. ModuleNotFoundError: No module named 'google.generativeai'**
-- **Solution**: Install dependencies with `pip install -r requirements.txt`
-- If using VLM scoring, ensure `google-generativeai` is installed
-
-**2. API rate limit errors with Gemini**
-- **Solution**: The free tier has restrictive limits. Consider:
-  - Using `--vision_type opencv` instead
-  - Upgrading to a paid Gemini API tier
-  - Processing smaller batches
-
-**3. All episodes filtered out**
-- **Error**: `ValueError: All episodes filtered out, decrease threshold to fix this`
-- **Solution**: Lower the `--threshold` value (e.g., from 0.5 to 0.3)
-
-**4. Dataset not found**
-- **Solution**:
-  - Verify the `--repo_id` is correct
-  - Check internet connection for HuggingFace Hub access
-  - Use `--root` to specify a local dataset path
-
-**5. Out of memory during training**
-- **Solution**: Reduce `batch_size` in `train.py:44` or use a smaller model
-
-**6. Permission errors when overwriting**
-- **Solution**: Use `--overwrite True` or manually delete the output directory
-
----
-
-## 🤝 Contributing
-
-We welcome contributions! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines on:
-- Setting up a development environment
-- Code style and conventions
-- Submitting pull requests
-- Reporting issues
-
-### Quick Contribution Steps
-1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit your changes (`git commit -m 'Add amazing feature'`)
-4. Push to the branch (`git push origin feature/amazing-feature`)
-5. Open a Pull Request
-
----
-
-## ⭐ Star History
-
-[![Star History Chart](https://api.star-history.com/svg?repos=RoboticsData/score_lerobot_episodes&type=Date)](https://www.star-history.com/#RoboticsData/score_lerobot_episodes&Date)
+> The pre-2.0 HuggingFace/Gemini scoring path (`score_dataset.py`, `train.py`,
+> the Streamlit `ui.py`) is superseded by the pipeline above and kept only under
+> the `legacy` extra (`pip install -e ".[legacy]"`).
 
 ---
 
 ## 📄 License
 
-LeRobot Episode Scoring Toolkit is distributed under the **Apache 2.0 License**. See [LICENSE](LICENSE) for more information.
-
----
+LeRobot Episode Scoring Toolkit is distributed under the **Apache 2.0 License**.
+See [LICENSE](LICENSE) for more information.
 
 ## 📧 Support
 
 - **Issues**: [GitHub Issues](https://github.com/RoboticsData/score_lerobot_episodes/issues)
 - **Discussions**: [GitHub Discussions](https://github.com/RoboticsData/score_lerobot_episodes/discussions)
-- **Documentation**: This README and inline code documentation
-
