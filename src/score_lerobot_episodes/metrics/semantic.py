@@ -39,6 +39,20 @@ from typing import Any, Callable, Iterable
 # --------------------------------------------------------------------------
 
 
+def _unset_if_blank(value: str | None) -> str | None:
+    """``None`` for anything with no content, the stripped text otherwise.
+
+    The endpoint settings all reach here from a text box or a command line,
+    where "left empty" arrives as ``""`` or as spaces rather than as ``None``.
+    Collapsing both to ``None`` is what lets the ``or DEFAULT`` fallbacks below
+    mean "not set" instead of "set to nothing".
+    """
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
 @dataclass
 class SemanticVerdict:
     """One episode's task-success judgement."""
@@ -103,9 +117,14 @@ class SemanticFilter:
 
         self._evaluator = None
         self._evaluator_kwargs = {
-            "base_url": base_url,
-            "model": model,
-            "api_key": api_key,
+            "base_url": _unset_if_blank(base_url),
+            "model": _unset_if_blank(model),
+            # A blank credential is "not set", not a credential.  Without this,
+            # a whitespace string is truthy enough to survive the ``or DEFAULT``
+            # below and arrives at the OpenAI client as a real key, which then
+            # fails with an authentication error rather than falling back to the
+            # local-vLLM placeholder the user meant.
+            "api_key": _unset_if_blank(api_key),
             "inline_media": inline_media,
             "max_frames": max_frames,
             "structured": structured,
@@ -280,14 +299,33 @@ def default_task(root: str | Path) -> str:
     return ""
 
 
-def server_is_reachable(base_url: str | None = None, timeout: float = 3.0) -> bool:
-    """Cheap liveness probe, so a batch run can fail fast with a clear message."""
+def server_is_reachable(
+    base_url: str | None = None,
+    timeout: float = 3.0,
+    api_key: str | None = None,
+) -> bool:
+    """Cheap liveness probe, so a batch run can fail fast with a clear message.
+
+    A hosted endpoint answers ``/models`` with 401 when the probe carries no
+    credential, which would report a perfectly healthy server as down.  So the
+    key is sent when there is one — and only when there is one: a blank or
+    absent key means the header is left off entirely rather than sent empty,
+    which some gateways reject outright instead of treating as anonymous.
+    """
     import urllib.error
     import urllib.request
 
     base = base_url or os.environ.get("COSMOS_BASE_URL", "http://localhost:8000/v1")
+    key = _unset_if_blank(api_key)
+    headers = {"Authorization": f"Bearer {key}"} if key and key != "EMPTY" else {}
+    request = urllib.request.Request(f"{base.rstrip('/')}/models", headers=headers)
     try:
-        with urllib.request.urlopen(f"{base.rstrip('/')}/models", timeout=timeout) as response:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
             return 200 <= response.status < 300
+    except urllib.error.HTTPError as exc:
+        # It answered, so it is up.  Whether the credential is right is the
+        # request's problem to report, with the server's own message, rather
+        # than this probe's to guess at.
+        return exc.code < 500
     except (urllib.error.URLError, OSError, ValueError):
         return False

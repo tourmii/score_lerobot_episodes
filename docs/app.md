@@ -35,17 +35,74 @@ corner that persists.
    table.
 4. **Open an episode** — the recording plays beside the signals it was judged
    on. The playhead follows the video; clicking a trace seeks the video there.
-5. **Set the decision rule** — *every family must pass* (the default) or
-   *weighted mean must pass*. Re-scoring is in-process and takes milliseconds,
-   so the whole dataset re-decides as you drag. See
+5. **Set the decision rule** — *one threshold, physical anchors* (the default),
+   *every family must pass*, *weighted mean must pass*, or *limits per
+   quantity*. Re-scoring is in-process and takes milliseconds, so the whole
+   dataset re-decides as you drag. For the first, see
+   [`absolute_scoring.md`](absolute_scoring.md); for the others,
    [`metrics_reference.md` §5.6](metrics_reference.md) — the same threshold is
    far stricter per-family than on a mean, and the rail says how many episodes
    the current setting accepts.
 6. **Run the semantic filter** — if a Cosmos-Reason vLLM server is reachable,
    each episode gets a task-success verdict. Verdicts are cached to JSONL and
-   never re-requested.
+   never re-requested. The **api key** field is for a hosted endpoint; leave it
+   blank for a local server, and the field is left out of the request entirely
+   rather than sent empty. The key travels with that one request: it is never
+   written to `.quality_app/` and never comes back from any route.
 7. **Export** — measurements + scores as CSV, or the accepted episode list as
    JSON.
+
+## The absolute mode
+
+This is the default rule. The other three normalise against ranges fitted to
+the batch being scored, so a family score is a percentile rank inside that batch and the
+threshold removes about the same share of anything you hand it. *One threshold,
+physical anchors* is the mode that does not: every quantity is judged against a
+`good` and a `bad` anchor in its own unit, and the score is the probability that
+no criterion is violated. [`absolute_scoring.md`](absolute_scoring.md) has the
+model; this is how the app exposes it.
+
+Selecting the mode replaces the weight sliders with a profile panel:
+
+| control | what it does |
+|---|---|
+| **accept ≥** | the one knob. `total` is a probability, so 0.5 reads as "more likely clean than not" |
+| **good σ / bad σ** | where a refit places the anchors, in robust sigmas from the median |
+| **task s** | seconds a clean run of this task takes — a task constant, not a dataset statistic |
+| **refit anchors to this dataset** | re-estimates the platform anchors here. Keeps the threshold: how strict to be is your decision, not something the data has an opinion on |
+| **download profile** | the anchors as JSON, to load on every later dataset |
+| **load profile…** | adopt anchors fitted elsewhere — the step that makes the threshold transfer |
+
+The panel says which of the two situations you are in, because it is the
+difference between the mode working and not working. Anchors fitted on the batch
+being judged give a verdict that still moves with the batch; anchors loaded from
+a file do not. Measuring a dataset fits a profile automatically so the mode is
+usable immediately, and the panel marks it as a starting point until you load
+one.
+
+Two things change elsewhere on the page. The episode table grows a **sev**
+column and sorts on it by default: `total` is a product over a dozen criteria,
+so on a poor batch every episode prints as `0.000` and the column stops ranking
+exactly where a reviewer needs it to. The episode page grows a **criteria**
+panel — the measured value beside the two anchors it was judged against, worst
+first, for accepted episodes as well as rejected ones, since the reason list
+only names what condemned an episode and never how close the rest came. It is
+collapsed by default, because for most episodes every criterion is clear and
+twenty rows of zeroes would sit above the flags and the semantic verdict, which
+are what a reviewer reads first. The summary line carries the one number that
+says whether opening it is worth it — how many criteria are past `good` — and
+the panel stays open across a re-score once you have opened it.
+
+A **drift** card appears on the overview: per criterion, the share of episodes
+past `good` and past `bad`. A frozen profile cannot distinguish a genuinely
+worse batch from a different robot, a changed control rate or a re-aimed camera
+— both look like everything got worse — and it cannot tell you by quietly
+adapting, which is what the percentile ranges do. So it reports and leaves the
+call to a human.
+
+`export.json` carries the whole profile in this mode, not just the threshold:
+the accepted list cannot be reproduced later from a number without the anchors
+it was applied to.
 
 ## Why measure and score are separate endpoints
 
@@ -67,8 +124,12 @@ parquet file. It is the same separation the metrics themselves are built on
 | `POST` | `/api/datasets/{id}/analyze` | `{useVideo, workers, loPct, hiPct}` → job |
 | `GET` | `/api/datasets/{id}/overview` | distributions, counts, calibration |
 | `PUT` | `/api/datasets/{id}/policy` | `{mode, aggregate, weights, threshold, minimums, rules}` → overview |
-| `POST` | `/api/datasets/{id}/calibrate` | `{loPct, hiPct}` → refit the ranges |
-| `POST` | `/api/datasets/{id}/semantic` | `{baseUrl, model, workers}` → job |
+| `POST` | `/api/datasets/{id}/calibrate` | `{loPct, hiPct}` → refit the percentile ranges |
+| `POST` | `/api/datasets/{id}/profile/fit` | `{goodSigma, badSigma, taskDuration}` → refit the absolute anchors |
+| `POST` | `/api/datasets/{id}/profile` | `{profile, source}` → adopt anchors fitted elsewhere |
+| `GET` | `/api/datasets/{id}/profile.json` | the anchors, to reuse on another dataset |
+| `GET` | `/api/datasets/{id}/drift` | this batch measured against those anchors |
+| `POST` | `/api/datasets/{id}/semantic` | `{baseUrl, model, apiKey?, workers}` → job |
 | `GET` | `/api/datasets/{id}/episodes` | table rows |
 | `GET` | `/api/datasets/{id}/episodes/{ep}` | chart payload + full detail |
 | `GET` | `/api/datasets/{id}/episodes/{ep}/video` | range-streamed mp4 |

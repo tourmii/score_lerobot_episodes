@@ -23,6 +23,7 @@ const state = {
   sort: { key: 'total', asc: true },
   filter: { decision: new Set(), text: '' },
   railFilter: 'all',
+  criteriaOpen: false,   // the per-criterion table on the episode page
   chart: null,
   players: [],        // <video> elements, players[0] is the clock
   poll: null,
@@ -65,7 +66,9 @@ function bar(value) {
 
 function barClass(value) {
   if (value == null) return '';
-  const floor = state.overview ? state.overview.threshold : 0.35;
+  const o = state.overview;
+  const floor = !o ? 0.35
+    : (o.mode === 'absolute' && o.profileThreshold != null ? o.profileThreshold : o.threshold);
   if (value < floor) return 'low';
   if (value < floor + 0.15) return 'mid';
   return '';
@@ -244,13 +247,20 @@ $('#semanticBtn').addEventListener('click', async () => {
   if (!state.dataset) return;
   $('#semanticError').textContent = '';
   try {
+    const body = {
+      baseUrl: $('#semanticUrl').value.trim() || null,
+      model: $('#semanticModel').value.trim() || null,
+      workers: 4,
+    };
+    // Omitted rather than sent as null or "": a blank key must look to the
+    // server exactly like a request that never mentioned one, so a local vLLM
+    // endpoint keeps working and nothing empty reaches the OpenAI client,
+    // which rejects an empty credential outright.
+    const key = $('#semanticKey').value.trim();
+    if (key) body.apiKey = key;
+
     const job = await api(`/api/datasets/${state.dataset.id}/semantic`, {
-      method: 'POST',
-      body: {
-        baseUrl: $('#semanticUrl').value.trim() || null,
-        model: $('#semanticModel').value.trim() || null,
-        workers: 4,
-      },
+      method: 'POST', body,
     });
     trackJob(job, {
       block: $('#semanticProgress'),
@@ -282,16 +292,21 @@ function schedulePolicy() {
 
 async function applyPolicy() {
   if (!state.dataset) return;
-  const weights = {};
-  for (const input of document.querySelectorAll('#weightSliders input[type=range]')) {
-    weights[input.dataset.family] = Number(input.value);
+  const mode = $('#mode').value;
+  const body = { mode, threshold: Number($('#threshold').value) };
+  if (mode !== 'absolute') {
+    // In absolute mode the weights live on the profile, one per criterion in
+    // its own unit — the five family sliders do not apply, and sending them
+    // would quietly overwrite a policy the mode does not use.
+    const weights = {};
+    for (const input of document.querySelectorAll('#weightSliders input[type=range]')) {
+      weights[input.dataset.family] = Number(input.value);
+    }
+    body.weights = weights;
+    body.aggregate = $('#aggregate').value;
   }
   state.overview = await api(`/api/datasets/${state.dataset.id}/policy`, {
-    method: 'PUT',
-    body: {
-      weights, threshold: Number($('#threshold').value),
-      mode: $('#mode').value, aggregate: $('#aggregate').value,
-    },
+    method: 'PUT', body,
   });
   state.rows = await api(`/api/datasets/${state.dataset.id}/episodes`);
   renderModeNote();
@@ -326,11 +341,15 @@ function renderControls() {
     });
     box.appendChild(row);
   }
-  $('#threshold').value = state.overview.threshold;
-  $('#thresholdValue').textContent = Number(state.overview.threshold).toFixed(2);
-  $('#mode').value = state.overview.mode || 'gate';
-  $('#aggregate').value = state.overview.aggregate || 'geometric';
+  const o = state.overview;
+  const live = o.mode === 'absolute' && o.profileThreshold != null
+    ? o.profileThreshold : o.threshold;
+  $('#threshold').value = live;
+  $('#thresholdValue').textContent = Number(live).toFixed(2);
+  $('#mode').value = o.mode || 'absolute';
+  $('#aggregate').value = o.aggregate || 'geometric';
   renderModeNote();
+  renderProfileNote();
   const calib = state.overview.calibration;
   $('#calibNote').textContent = calib && calib.n_episodes_fitted
     ? `ranges fitted on ${calib.n_episodes_fitted} valid episodes · `
@@ -339,6 +358,11 @@ function renderControls() {
 }
 
 const MODE_NOTES = {
+  absolute: 'One threshold, and it means the same thing on every dataset. Each '
+          + 'quantity is judged against a <b>good</b> and a <b>bad</b> anchor in '
+          + 'its own physical unit, and the score is the probability that no '
+          + 'criterion is violated. Freeze the anchors on a batch you trust, '
+          + 'reuse them everywhere, and this is the only number you turn.',
   rules: 'A limit per quantity, in its own physical unit — no aggregate is '
        + 'involved. This is the only rule whose verdict does not depend on the '
        + 'rest of the batch: the normalised families are percentile ranks, so a '
@@ -361,11 +385,71 @@ function renderModeNote() {
   $('#modeNote').innerHTML = MODE_NOTES[mode]
     + (total ? `<br><b>${counts.accept || 0}</b> of ${total} accepted`
              + (counts.review ? `, ${counts.review} to review` : '') : '');
-  $('#thresholdRow').hidden = mode !== 'weighted';
+  const absolute = mode === 'absolute';
+  $('#thresholdRow').hidden = !(mode === 'weighted' || absolute);
   $('#weightsNote').textContent = mode === 'weighted' ? '' : '— ranking only';
+  $('#profileBlock').hidden = !absolute;
+  $('#weightBlock').hidden = absolute;
+  $('#aggregateRow').hidden = absolute;
+}
+
+/** Say where the anchors came from — the one thing that decides whether the
+ *  threshold transfers. Anchors fitted on the batch being judged give a verdict
+ *  that still depends on that batch, which is the failure the mode exists to
+ *  fix, so it is stated rather than left to be inferred from a blank field. */
+function renderProfileNote() {
+  const note = $('#profileNote');
+  if (!note) return;
+  const o = state.overview;
+  const p = o.profile;
+  if (!p) { note.innerHTML = 'No anchors yet — measure the dataset first.'; return; }
+  const where = `${p.n_episodes_fitted || 0} episodes`
+    + (p.fitted_on ? ` of ${esc(p.fitted_on)}` : '');
+  note.innerHTML = o.profileSource
+    ? `<b>Frozen anchors</b> (${esc(o.profileSource)}), fitted on ${where}. `
+      + 'The verdict does not depend on this batch — which is the point.'
+    : `<b>Anchors fitted on this dataset</b> (${where}). A starting point: the `
+      + 'verdict still moves with the batch. Download them, then load the same '
+      + 'file on every later run.';
 }
 
 $('#mode').addEventListener('change', () => { renderModeNote(); applyPolicy(); });
+
+$('#fitProfileBtn').addEventListener('click', async () => {
+  const task = Number($('#taskDuration').value);
+  state.overview = await api(`/api/datasets/${state.dataset.id}/profile/fit`, {
+    method: 'POST',
+    body: {
+      goodSigma: Number($('#goodSigma').value) || 1,
+      badSigma: Number($('#badSigma').value) || 4,
+      taskDuration: task > 0 ? task : null,
+    },
+  });
+  await refreshScores();
+});
+
+$('#downloadProfileBtn').addEventListener('click', () => {
+  window.location = `/api/datasets/${state.dataset.id}/profile.json`;
+});
+
+$('#uploadProfileBtn').addEventListener('click', () => $('#profileFile').click());
+
+$('#profileFile').addEventListener('change', async (event) => {
+  const file = event.target.files && event.target.files[0];
+  event.target.value = '';                    // re-selecting the same file works
+  if (!file) return;
+  let parsed;
+  try {
+    parsed = JSON.parse(await file.text());
+  } catch (err) {
+    alert(`${file.name} is not valid JSON: ${err.message}`);
+    return;
+  }
+  state.overview = await api(`/api/datasets/${state.dataset.id}/profile`, {
+    method: 'POST', body: { profile: parsed, source: file.name },
+  });
+  await refreshScores();
+});
 $('#aggregate').addEventListener('change', applyPolicy);
 $('#threshold').addEventListener('input', () => {
   $('#thresholdValue').textContent = Number($('#threshold').value).toFixed(2);
@@ -483,6 +567,9 @@ async function renderEpisode(episode) {
 
   const score = payload.score || {};
   const nav = payload.neighbours || {};
+  // Kept so a re-score can repaint the side panel from a table row, which
+  // carries the verdict but not the per-criterion evidence behind it.
+  state.episodeCriteria = payload.criteria || [];
   const base = `#/d/${state.dataset.id}`;
   const videos = payload.videos || [];
   const frames = payload.frames || Math.round((payload.duration || 0) * (payload.fps || 30));
@@ -599,6 +686,38 @@ function verdictSide(payload) {
       : '<span class="sub">none</span>'
   }</div></div>`);
 
+  const criteria = payload.criteria || [];
+  if (criteria.length) {
+    // Collapsed by default: for most episodes every criterion is clear and the
+    // table is twenty rows of zeroes above the flags and the semantic verdict,
+    // which are what a reviewer reads first.  The summary carries the one number
+    // that says whether opening it is worth it.
+    const over = criteria.filter(c => c.p > 0).length;
+    parts.push(`<details class="collapse" id="criteriaPanel"${state.criteriaOpen ? ' open' : ''}>
+      <summary><h2>criteria</h2>
+        <span class="right sub">${over
+          ? `${over} of ${criteria.length} past good`
+          : `all ${criteria.length} clear`}</span></summary>
+      <div class="collapse-body">
+        <div class="hint" style="margin:0 0 8px">Worst first. The measured value
+          beside the two anchors it was judged against — shown for accepted
+          episodes too, since the reasons above only name what condemned one.</div>
+        <div class="tbl-wrap"><table class="rows criteria">
+          <thead><tr><th>criterion</th><th class="v">value</th>
+            <th class="v">good → bad</th><th class="v">p</th></tr></thead>
+          <tbody>${criteria.map(c => `<tr class="${c.p > 0.5 ? 'discarded' : ''}">
+            <td>${esc(c.label)}${c.action === 'review'
+              ? ' <span class="sub">(review only)</span>' : ''}</td>
+            <td class="v mono">${c.value == null ? '–' : num(c.value, 3)}${
+              c.unit ? ` <span class="sub">${esc(c.unit)}</span>` : ''}</td>
+            <td class="v mono sub">${num(c.good, 2)} → ${num(c.bad, 2)}</td>
+            <td class="v mono">${c.p == null ? '–' : num(c.p, 2)}</td>
+          </tr>`).join('')}</tbody>
+        </table></div>
+      </div>
+    </details>`);
+  }
+
   const detail = payload.semanticDetail;
   if (detail || score.semantic != null) {
     const value = detail ? detail.score : score.semantic;
@@ -611,6 +730,10 @@ function verdictSide(payload) {
   }
   return parts.join('');
 }
+
+document.addEventListener('toggle', ev => {
+  if (ev.target && ev.target.id === 'criteriaPanel') state.criteriaOpen = ev.target.open;
+}, true);
 
 function refreshEpisodeVerdict() {
   // Re-scoring changed the decision; repaint the parts that show it without
@@ -632,6 +755,7 @@ function refreshEpisodeVerdict() {
     side.innerHTML = verdictSide({
       score: { reasons: row.reasons, decision: row.decision, semantic: row.semantic },
       raisedFlags: row.flags,
+      criteria: state.episodeCriteria || [],
       semanticDetail: null,
     });
   }
@@ -784,10 +908,17 @@ function renderOverview() {
       <div class="grid2">
         <div class="card"><h2>score distribution</h2>
           <canvas class="hist" id="hist"></canvas>
-          <div class="hint">the line marks the accept threshold (${num(o.threshold, 2)})</div>
+          <div class="hint">the line marks the accept threshold (${
+            num(o.mode === 'absolute' ? o.profileThreshold : o.threshold, 2)})${
+            o.mode === 'absolute'
+              ? ' — the score is P(no criterion violated), so a poor batch piles '
+                + 'up against zero; sort the table by severity to rank inside it'
+              : ''}</div>
         </div>
         <div class="card" id="thresholdCard"></div>
       </div>
+      ${o.mode === 'absolute' ? '<div class="card" id="driftCard"><h2>drift</h2>'
+        + '<div class="hint">loading…</div></div>' : ''}
       ${o.mode === 'rules' ? '<div id="rulesPanel"></div>' : ''}
       ${agreementPanel(o.agreement)}
       <div class="card">
@@ -797,8 +928,10 @@ function renderOverview() {
       </div>
     </div>`;
 
-  drawHistogram($('#hist'), o.histogram, o.threshold);
+  drawHistogram($('#hist'), o.histogram,
+                o.mode === 'absolute' ? o.profileThreshold : o.threshold);
   renderThresholds();
+  if (o.mode === 'absolute') renderDrift();
   if (o.mode === 'rules') renderRules();
   renderTools();
   renderTable();
@@ -825,6 +958,10 @@ function renderThresholds() {
       ${gating
         ? 'Each family must clear its own line. The bar is that family\'s p5–p95 across '
           + 'the dataset, the tick is its median — drag the handle to place the cut.'
+        : o.mode === 'absolute'
+        ? 'A breakdown, not a gate: the same noisy-OR restricted to each family, so '
+          + 'you can see which one is costing an episode its score. Nothing here '
+          + 'decides — the single threshold does.'
         : 'The bar is each family\'s p5–p95, the tick its median. Switch the rule to '
           + '<b>every family must pass</b> to make these thresholds decide.'}
     </div>
@@ -879,6 +1016,49 @@ function thresholdRow(family, o, gating) {
     <span class="tbelow sub ${gating && below ? 'hits' : ''}" data-below="${family}">${
       gating ? (below ? `${below} below` : 'none below') : ''}</span>
   </div>`;
+}
+
+/** How far this batch sits outside the loaded anchors.
+ *
+ *  A frozen profile cannot tell a genuinely worse batch from a different robot,
+ *  a changed control rate or a re-aimed camera — both look like "everything got
+ *  worse". Neither can it tell you by quietly adapting, which is what the
+ *  percentile ranges do. So it reports, and leaves the call to a human. */
+async function renderDrift() {
+  const card = $('#driftCard');
+  if (!card) return;
+  let rows;
+  try {
+    rows = await api(`/api/datasets/${state.dataset.id}/drift`);
+  } catch (err) {
+    card.innerHTML = `<h2>drift</h2><div class="hint">${esc(err.message)}</div>`;
+    return;
+  }
+  const alarming = rows.filter(r => r.over_bad != null && r.over_bad > 0.3).length;
+  card.innerHTML = `
+    <h2>drift <span class="sub">${rows.length} criteria</span></h2>
+    <div class="hint" style="margin:-3px 0 12px">
+      Share of episodes past each anchor. A few criteria mildly over is a batch
+      with problems. <b>&gt;bad</b> above 30% on one criterion whose neighbours
+      are clean usually means the anchor no longer describes this hardware — the
+      profile wants refitting rather than the batch wanting rejecting.
+      ${alarming ? `<b>${alarming}</b> ${alarming === 1 ? 'criterion is' : 'criteria are'} over that mark.` : ''}
+    </div>
+    <div class="tbl-wrap"><table class="rows">
+      <thead><tr><th>criterion</th><th class="v">median</th><th class="v">median u</th>
+        <th class="v">&gt;good</th><th class="v">&gt;bad</th></tr></thead>
+      <tbody>${rows.map(r => `<tr class="${r.over_bad > 0.3 ? 'discarded' : ''}">
+        <td>${esc(r.label || r.quantity)}</td>
+        <td class="v mono">${num(r.median_value, 3)}</td>
+        <td class="v mono">${num(r.median_u, 2)}</td>
+        <td class="v mono">${pct(r.over_good)}</td>
+        <td class="v mono">${pct(r.over_bad)}</td>
+      </tr>`).join('')}</tbody>
+    </table></div>`;
+}
+
+function pct(value) {
+  return value == null || Number.isNaN(value) ? '–' : `${Math.round(value * 100)}%`;
 }
 
 async function applyThresholds() {
@@ -1123,6 +1303,13 @@ function renderTable() {
       cell: r => `<span class="badge ${r.decision}">${r.decision}</span>` },
     { key: 'total', label: 'total', v: true, get: r => r.total,
       cell: r => `${bar(r.total)}<span class="mono">${num(r.total)}</span>` },
+    // ``total`` is a product over a dozen criteria, so on a poor batch every
+    // episode prints as 0.000 and the column stops ranking exactly where a
+    // reviewer needs it to.  ``severity`` is the same quantity in nats.
+    ...(state.overview.mode === 'absolute' ? [{
+      key: 'severity', label: 'sev', v: true, get: r => r.severity,
+      cell: r => `<span class="mono">${num(r.severity, 1)}</span>`,
+    }] : []),
     ...families.map(f => ({
       key: f, label: f.slice(0, 9), v: true,
       get: r => r.families[f], cell: r => num(r.families[f], 2),
@@ -1139,7 +1326,9 @@ function renderTable() {
 
   const rows = visibleRows();
   const { key, asc } = state.sort;
-  const column = columns.find(c => c.key === key) || columns[2];
+  const fallback = columns.find(c => c.key === (
+    state.overview.mode === 'absolute' ? 'severity' : 'total')) || columns[2];
+  const column = columns.find(c => c.key === key) || fallback;
   rows.sort((a, b) => {
     const va = column.get(a), vb = column.get(b);
     if (va === null || va === undefined) return 1;

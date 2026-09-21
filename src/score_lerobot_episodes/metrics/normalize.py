@@ -716,10 +716,18 @@ class EpisodeScore:
     reasons: list[str] = field(default_factory=list)
     semantic_score: float | None = None
     semantic_note: str = ""
+    #: Evidence against the episode, in nats: ``-log(total)``.  ``total`` is a
+    #: probability, and a product over a dozen criteria spans so many decades
+    #: that every hopeless episode prints as ``0.000`` and stops being sortable
+    #: — exactly the episodes a reviewer most wants ordered.  ``severity`` is
+    #: the same quantity on a scale that stays legible: 0 is clean, ~0.7 is the
+    #: default accept line, 10+ is condemned several times over.  It ranks;
+    #: ``total`` decides.
+    severity: float = 0.0
 
     def to_row(self) -> dict[str, Any]:
         row: dict[str, Any] = {"episode": self.episode, "total": self.total,
-                               "decision": self.decision}
+                               "severity": self.severity, "decision": self.decision}
         row.update(self.families)
         row.update(self.flags)
         if self.semantic_score is not None:
@@ -769,6 +777,7 @@ def score_episode(
         flags=m.flags.to_dict(),
         semantic_score=semantic_score,
         semantic_note=semantic_note,
+        severity=-math.log(max(total, 1e-12)),
     )
     decide(score, m, policy)
     return score

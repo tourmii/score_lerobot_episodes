@@ -46,6 +46,10 @@ from . import (
     Calibration,
     DEFAULT_WEIGHTS,
     Policy,
+    QualityProfile,
+    drift_report,
+    format_drift,
+    score_episode_absolute,
     groups_from_modality,
     measure_episode,
     score_episode,
@@ -207,17 +211,39 @@ def build_parser() -> argparse.ArgumentParser:
     cal.add_argument("--lo-pct", type=float, default=5.0, help="lower percentile of each range")
     cal.add_argument("--hi-pct", type=float, default=95.0, help="upper percentile of each range")
 
+    pro = p.add_argument_group("absolute profile (mode=absolute)")
+    pro.add_argument("--profile", help="load anchors from this JSON and DO NOT refit — "
+                                       "this is what makes one threshold transfer")
+    pro.add_argument("--fit-profile", metavar="OUT.json",
+                     help="fit the platform anchors on THIS dataset and write them out. "
+                          "Run once, on a batch you have inspected; reuse with --profile")
+    pro.add_argument("--good-sigma", type=float, default=1.0,
+                     help="robust sigmas from the median to the 'stops mattering' anchor "
+                          "(higher = more permissive, default 1.0)")
+    pro.add_argument("--bad-sigma", type=float, default=4.0,
+                     help="robust sigmas to the 'condemns on its own' anchor (default 4.0)")
+    pro.add_argument("--task-duration", type=float, default=None,
+                     help="seconds a clean run of this task takes; a task constant, not a "
+                          "dataset statistic (default: median of the fitted batch)")
+    pro.add_argument("--drift", action="store_true",
+                     help="report how far this dataset sits outside the loaded profile")
+
     dec = p.add_argument_group("decision")
-    dec.add_argument("--mode", choices=("gate", "rules", "weighted"), default="gate",
-                     help="gate (default): every weighted family must clear its own "
-                          "threshold; rules: a limit per quantity in physical units, no "
-                          "aggregate; weighted: only the weighted mean must pass")
+    dec.add_argument("--mode", choices=("absolute", "gate", "rules", "weighted"),
+                     default="absolute",
+                     help="absolute (default): one threshold on a noisy-OR of "
+                          "physical-unit criteria, comparable across datasets; gate: "
+                          "every weighted family must clear its own threshold; rules: a "
+                          "limit per quantity, no aggregate; weighted: only the weighted "
+                          "mean must pass")
     dec.add_argument("--limit", action="append", default=[], metavar="QTY>VALUE",
                      help="physical limit for rules mode, e.g. 'acc_arm_p99>18' or "
                           "'ldlj_wrist<-20'; repeatable. Suffix with ':review' to flag "
                           "instead of reject")
-    dec.add_argument("--threshold", type=float, default=0.35,
-                     help="accept above this (per family in gate mode; ~0.6 suits weighted)")
+    dec.add_argument("--threshold", type=float, default=None,
+                     help="accept above this. absolute (the default mode): P(no criterion "
+                          "violated), 0.5 unless set, and the only knob you should need. "
+                          "gate: per family, 0.35. weighted: ~0.6")
     dec.add_argument("--weights", help="family weights, e.g. 'acceleration=0.4,video=0.1'")
     dec.add_argument("--min", action="append", default=[], metavar="FAMILY=VALUE",
                      help="per-family floor sending an episode to review; repeatable")
@@ -227,6 +253,9 @@ def build_parser() -> argparse.ArgumentParser:
                      help="judge task success from the video with Cosmos-Reason")
     sem.add_argument("--semantic-base-url", default=None, help="vLLM endpoint (COSMOS_BASE_URL)")
     sem.add_argument("--semantic-model", default=None, help="served model name (COSMOS_MODEL)")
+    sem.add_argument("--api-key", default=None,
+                     help="credential for a hosted endpoint (COSMOS_API_KEY). Leave it "
+                          "off for a local vLLM server, which wants no credential")
     sem.add_argument("--semantic-workers", type=int, default=4, help="concurrent requests")
     sem.add_argument("--semantic-cache", default=None,
                      help="verdict JSONL, reused across runs (default: OUT_DIR/semantic.jsonl)")
@@ -280,6 +309,11 @@ def main() -> int:
           + (f" · excluded: {invalid}" if invalid else ""))
 
     # ---- 2. calibrate ---------------------------------------------------
+    absolute = args.mode == "absolute" or args.profile or args.fit_profile
+    profile = None
+    if absolute:
+        profile = build_profile(args, measures, root, out_dir)
+
     if args.calibration:
         calib = Calibration.load(args.calibration)
         print(f"calibration loaded from {args.calibration}")
@@ -304,29 +338,110 @@ def main() -> int:
     for item in args.min:
         key, _, value = item.partition("=")
         minimums[key.strip()] = float(value)
-    policy = Policy(mode=args.mode, accept_threshold=args.threshold, minimums=minimums,
-                    rules=parse_limits(args.limit))
+    policy = Policy(mode=args.mode if not absolute else "weighted",
+                    accept_threshold=args.threshold if args.threshold is not None else 0.35,
+                    minimums=minimums, rules=parse_limits(args.limit))
 
     scores = {}
     for episode, m in measures.items():
         verdict = verdicts.get(episode)
-        scores[episode] = score_episode(
-            m, calib, weights, policy,
-            semantic_score=None if verdict is None else verdict.score,
-            semantic_note="" if verdict is None else verdict.summary,
-        )
+        semantic = None if verdict is None else verdict.score
+        note = "" if verdict is None else verdict.summary
+        if absolute:
+            scores[episode] = score_episode_absolute(m, profile, semantic, note)
+        else:
+            scores[episode] = score_episode(m, calib, weights, policy, semantic, note)
 
     table = pd.DataFrame([s.to_row() for s in scores.values()]).set_index("episode")
     table.to_csv(out_dir / "scores.csv")
 
-    report(raw, table, weights, root, camera, episodes)
+    if absolute:
+        report_absolute(table, profile, root, camera, episodes)
+        if args.drift:
+            print("\ndrift against the loaded anchors "
+                  "(high >bad on a lone criterion = the profile, not the batch):")
+            print(format_drift(drift_report(measures.values(), profile)))
+    else:
+        report(raw, table, weights, root, camera, episodes)
 
     # ---- 5. visualise ---------------------------------------------------
     if want_viz:
         visualise(args, root, camera, measures, scores, table, out_dir)
 
-    print(f"\nwrote {out_dir}/measurements.csv, scores.csv, calibration.json")
+    written = "measurements.csv, scores.csv, calibration.json"
+    if absolute:
+        written += ", profile.json"
+    print(f"\nwrote {out_dir}/{written}")
     return 0
+
+
+# --------------------------------------------------------------------------
+# Absolute profile
+# --------------------------------------------------------------------------
+
+
+def build_profile(args, measures, root, out_dir) -> QualityProfile:
+    """Load a frozen profile, or fit one and say plainly that it is not frozen.
+
+    The distinction is the whole point of the mode, so it is printed rather than
+    implied: a profile loaded from disk gives a verdict that does not depend on
+    the batch, and a profile fitted here gives one that does.
+    """
+    if args.profile:
+        profile = QualityProfile.load(args.profile)
+        print(f"profile loaded from {args.profile}"
+              + (f" (fitted on {profile.fitted_on}, "
+                 f"{profile.n_episodes_fitted} episodes)" if profile.fitted_on else "")
+              + " — anchors NOT refitted")
+    else:
+        profile = QualityProfile.fit(
+            measures.values(), good_sigma=args.good_sigma, bad_sigma=args.bad_sigma,
+            fitted_on=str(root),
+        )
+        print(f"profile fitted on {profile.n_episodes_fitted} valid episodes of THIS "
+              f"dataset (good=+{args.good_sigma:g}s, bad=+{args.bad_sigma:g}s).")
+        print("  the verdict therefore still depends on this batch. Save it with "
+              "--fit-profile and pass it back with --profile on every later run.")
+
+    if args.task_duration is not None:
+        profile.task_duration_s = float(args.task_duration)
+    if args.threshold is not None:
+        profile.threshold = float(args.threshold)
+
+    print(f"  threshold={profile.threshold:g} · task duration="
+          f"{profile.task_duration_s:.2f}s · grasp nominal={profile.grasp_nominal} · "
+          f"{len(profile.active())} active criteria")
+
+    profile.save(out_dir / "profile.json")
+    if args.fit_profile:
+        profile.save(args.fit_profile)
+        print(f"  profile written to {args.fit_profile}")
+    return profile
+
+
+def report_absolute(table, profile, root, camera, episodes) -> None:
+    """Decisions, the score spread, and what the criteria actually cost."""
+    counts = table["decision"].value_counts()
+    n = len(table)
+    print(f"\n{'decision':<10}{'n':>6}{'share':>9}")
+    print("-" * 25)
+    for name in ("accept", "review", "reject"):
+        k = int(counts.get(name, 0))
+        print(f"{name:<10}{k:>6}{k / n:>9.0%}")
+
+    totals = table["total"].to_numpy(dtype=float)
+    q = np.percentile(totals, [10, 25, 50, 75, 90])
+    print(f"\nscore P(no criterion violated)  p10={q[0]:.3f}  p25={q[1]:.3f}  "
+          f"median={q[2]:.3f}  p75={q[3]:.3f}  p90={q[4]:.3f}")
+    print(f"threshold {profile.threshold:g} sits at the "
+          f"{float((totals < profile.threshold).mean()):.0%} mark of this batch")
+
+    rejected = table[table["decision"] == "reject"]
+    if len(rejected):
+        print(f"\nworst {min(10, len(rejected))} by severity:")
+        for episode, row in rejected.nlargest(min(10, len(rejected)), "severity").iterrows():
+            print(f"  ep {episode:<5} total={row['total']:.3f}  "
+                  f"severity={row['severity']:>6.1f}  {row['reasons'][:96]}")
 
 
 def run_semantic(args, root, episodes, camera, out_dir):
@@ -336,7 +451,8 @@ def run_semantic(args, root, episodes, camera, out_dir):
     if camera is None:
         print("semantic filter skipped: no camera in this dataset", file=sys.stderr)
         return {}
-    if not server_is_reachable(args.semantic_base_url):
+    api_key = (args.api_key or "").strip() or None
+    if not server_is_reachable(args.semantic_base_url, api_key=api_key):
         base = args.semantic_base_url or os.environ.get(
             "COSMOS_BASE_URL", "http://localhost:8000/v1")
         print(f"semantic filter skipped: no vLLM server at {base}\n"
@@ -360,6 +476,7 @@ def run_semantic(args, root, episodes, camera, out_dir):
     filt = SemanticFilter(
         base_url=args.semantic_base_url,
         model=args.semantic_model,
+        api_key=api_key,
         cache=cache,
         inline_media=args.semantic_inline_media,
         max_frames=args.semantic_max_frames,

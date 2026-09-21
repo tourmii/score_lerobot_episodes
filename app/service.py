@@ -26,15 +26,18 @@ from score_lerobot_episodes.metrics import (
     EpisodeMeasures,
     EpisodeScore,
     Policy,
+    QualityProfile,
+    drift_report,
     groups_from_modality,
     measure_episode,
     score_episode,
+    score_episode_absolute,
     signals_from_dataframe,
 )
 
 #: Bump when the pickled measurement layout changes, so stale caches are ignored
 #: rather than half-read.
-CACHE_VERSION = 3
+CACHE_VERSION = 4
 
 
 # --------------------------------------------------------------------------
@@ -127,9 +130,23 @@ class DatasetHandle:
     weights: dict[str, float] = field(default_factory=lambda: dict(DEFAULT_WEIGHTS))
     threshold: float = 0.35
     minimums: dict[str, float] = field(default_factory=dict)
-    mode: str = "gate"
+    #: ``"absolute"`` by default: it is the only rule whose threshold means the
+    #: same thing on the next dataset.  Until the dataset is measured there is no
+    #: profile yet, and :meth:`scores` falls back to the percentile path rather
+    #: than refusing to score.
+    mode: str = "absolute"
     aggregate: str = "geometric"
     rules: list[Rule] = field(default_factory=list)
+
+    #: Anchors in physical units for ``mode="absolute"``.  Its own threshold is
+    #: kept apart from :attr:`threshold` because the two numbers are not the same
+    #: quantity — one is a rank in this batch, the other a probability — and
+    #: carrying a value across a mode switch would silently change the bar.
+    profile: QualityProfile | None = None
+    #: Where the profile came from.  ``""`` means it was fitted on this dataset,
+    #: which is a starting point rather than the mode working as designed: a
+    #: verdict that still depends on the batch being judged.
+    profile_source: str = ""
 
     @property
     def analyzed(self) -> bool:
@@ -152,6 +169,8 @@ class DatasetHandle:
             "analyzedAt": self.analyzed_at,
             "hasSemantic": bool(self.semantic),
             "discarded": self.discarded,
+            "hasProfile": self.profile is not None,
+            "profileSource": self.profile_source,
         }
 
     def policy(self) -> Policy:
@@ -167,14 +186,17 @@ class DatasetHandle:
         """Score every measured episode under the current weights and policy."""
         calib = self.calibration or Calibration()
         policy = self.policy()
+        profile = self.profile
+        absolute = self.mode == "absolute" and profile is not None
         out: dict[int, EpisodeScore] = {}
         for episode, m in self.measures.items():
             verdict = self.semantic.get(episode)
-            out[episode] = score_episode(
-                m, calib, self.weights, policy,
-                semantic_score=None if not verdict else verdict.get("score"),
-                semantic_note="" if not verdict else (verdict.get("summary") or ""),
-            )
+            semantic = None if not verdict else verdict.get("score")
+            note = "" if not verdict else (verdict.get("summary") or "")
+            if absolute:
+                out[episode] = score_episode_absolute(m, profile, semantic, note)
+            else:
+                out[episode] = score_episode(m, calib, self.weights, policy, semantic, note)
         return out
 
 
@@ -351,6 +373,14 @@ class QualityService:
                 # Seeded at each quantity's own percentile and left disabled:
                 # a starting point to move, never a filter that fires by surprise.
                 handle.rules = suggest_rules(handle.measures.values())
+            if handle.profile is None:
+                # Fitted here so the absolute mode is usable the moment the
+                # dataset is measured.  ``profile_source`` stays empty to record
+                # that these anchors came from the batch being judged — the UI
+                # says so, and says to freeze them before trusting the verdict.
+                job.message = "fitting profile"
+                handle.profile = QualityProfile.fit(
+                    handle.measures.values(), fitted_on=handle.name)
             job.message = "caching"
             self._save_cache(handle)
             job.message = f"{len(measures)} episodes measured"
@@ -364,26 +394,80 @@ class QualityService:
         self._save_cache(handle)
         return handle.calibration
 
+    # ------------------------------------------------------------ profile
+    def fit_profile(
+        self,
+        handle: DatasetHandle,
+        good_sigma: float = 1.0,
+        bad_sigma: float = 4.0,
+        task_duration: float | None = None,
+    ) -> QualityProfile:
+        """Re-estimate the platform anchors from this dataset.
+
+        The threshold survives the refit: it is the user's decision about how
+        strict to be, not something the data has an opinion on.
+        """
+        threshold = handle.profile.threshold if handle.profile else 0.50
+        profile = QualityProfile.fit(
+            handle.measures.values(), good_sigma=good_sigma, bad_sigma=bad_sigma,
+            fitted_on=handle.name,
+        )
+        profile.threshold = threshold
+        if task_duration is not None:
+            profile.task_duration_s = float(task_duration)
+        handle.profile = profile
+        handle.profile_source = ""
+        self._save_cache(handle)
+        return profile
+
+    def load_profile(self, handle: DatasetHandle, data: dict[str, Any],
+                     source: str = "uploaded") -> QualityProfile:
+        """Adopt anchors fitted elsewhere — the point of the mode.
+
+        Anchors that came from another dataset are what make the threshold mean
+        the same thing here as it did there, so ``profile_source`` is set and the
+        UI stops warning that the verdict depends on this batch.
+        """
+        handle.profile = QualityProfile.from_dict(data)
+        handle.profile_source = source or "uploaded"
+        self._save_cache(handle)
+        return handle.profile
+
+    def drift(self, handle: DatasetHandle) -> list[dict[str, Any]]:
+        """How far this dataset sits outside the loaded anchors."""
+        if handle.profile is None:
+            return []
+        return [clean(row) for row in drift_report(handle.measures.values(), handle.profile)]
+
     # ----------------------------------------------------------- semantic
     def run_semantic(
         self,
         handle: DatasetHandle,
         base_url: str | None = None,
         model: str | None = None,
+        api_key: str | None = None,
         workers: int = 4,
         task: str | None = None,
         max_frames: int = 0,
         inline_media: bool = False,
         only: Iterable[int] | None = None,
     ) -> Job:
-        """Judge task success for every episode that has a video."""
+        """Judge task success for every episode that has a video.
+
+        ``api_key`` is for a hosted endpoint.  It is a per-call argument and is
+        deliberately not kept on the handle: the handle is pickled into
+        ``.quality_app/`` on every save, and a credential does not belong in a
+        cache file.  Blank means "not set" and is passed on as ``None``, so the
+        local-vLLM placeholder stays in effect rather than an empty string
+        reaching the client, which rejects it.
+        """
         from score_lerobot_episodes.metrics.semantic import (
             SemanticFilter, server_is_reachable, tasks_from_meta,
         )
 
         if handle.camera is None:
             raise ValueError("this dataset has no camera to judge")
-        if not server_is_reachable(base_url):
+        if not server_is_reachable(base_url, api_key=api_key or None):
             endpoint = base_url or os.environ.get("COSMOS_BASE_URL", "http://localhost:8000/v1")
             raise ConnectionError(
                 f"no vision-language server at {endpoint} — start one with "
@@ -405,7 +489,7 @@ class QualityService:
         job = self.jobs.create("semantic", handle.id, total=len(jobs))
         cache = self.state_dir / f"{handle.id}.semantic.jsonl"
         filt = SemanticFilter(
-            base_url=base_url, model=model, cache=cache,
+            base_url=base_url, model=model, api_key=(api_key or None), cache=cache,
             max_frames=max_frames, inline_media=inline_media, structured=True,
         )
 
@@ -442,6 +526,8 @@ class QualityService:
             "calibration": handle.calibration.to_dict() if handle.calibration else None,
             "semantic": handle.semantic,
             "rules": [r.to_dict() for r in handle.rules],
+            "profile": handle.profile.to_dict() if handle.profile else None,
+            "profile_source": handle.profile_source,
             "analyzed_at": handle.analyzed_at,
             "analyzed_with_video": handle.analyzed_with_video,
         }
@@ -466,6 +552,9 @@ class QualityService:
             handle.calibration = Calibration.from_dict(calibration) if calibration else None
             handle.semantic = payload.get("semantic") or {}
             handle.rules = [Rule.from_dict(r) for r in (payload.get("rules") or [])]
+            profile = payload.get("profile")
+            handle.profile = QualityProfile.from_dict(profile) if profile else None
+            handle.profile_source = payload.get("profile_source") or ""
             handle.analyzed_at = payload.get("analyzed_at")
             handle.analyzed_with_video = bool(payload.get("analyzed_with_video"))
             return True
@@ -530,6 +619,7 @@ def episode_rows(handle: DatasetHandle) -> list[dict[str, Any]]:
         rows.append(clean({
             "episode": episode,
             "total": score.total,
+            "severity": score.severity,
             "decision": score.decision,
             "reasons": score.reasons,
             "families": score.families,
@@ -593,6 +683,8 @@ def overview(handle: DatasetHandle) -> dict[str, Any]:
         "mean": float(np.mean(totals)) if totals else None,
         "median": float(np.median(totals)) if totals else None,
         "histogram": _histogram(totals),
+        "severityHistogram": severity_histogram(
+            [r.get("severity") for r in rows]),
         "distributions": distributions,
         "weights": handle.weights,
         "threshold": handle.threshold,
@@ -601,6 +693,9 @@ def overview(handle: DatasetHandle) -> dict[str, Any]:
         "aggregate": handle.aggregate,
         "rules": rule_report(handle),
         "calibration": handle.calibration.to_dict() if handle.calibration else None,
+        "profile": handle.profile.to_dict() if handle.profile else None,
+        "profileSource": handle.profile_source,
+        "profileThreshold": handle.profile.threshold if handle.profile else None,
         "agreement": agreement,
     })
 
@@ -609,6 +704,22 @@ def _histogram(values: list[float], bins: int = 20) -> dict[str, list[float]]:
     if not values:
         return {"edges": [], "counts": []}
     counts, edges = np.histogram(values, bins=bins, range=(0.0, 1.0))
+    return {"edges": [round(float(e), 4) for e in edges], "counts": [int(c) for c in counts]}
+
+
+def severity_histogram(values: list[float], bins: int = 20) -> dict[str, list[float]]:
+    """The companion histogram for the absolute mode.
+
+    ``total`` is a product over a dozen criteria, so on a poor batch every bar
+    piles into the leftmost bucket and the shape says nothing.  ``severity`` is
+    the same quantity in nats and spreads out, which is what makes the threshold
+    line readable against the distribution it is cutting.
+    """
+    finite = [v for v in values if v is not None and np.isfinite(v)]
+    if not finite:
+        return {"edges": [], "counts": []}
+    top = max(float(np.percentile(finite, 99)), 1.0)
+    counts, edges = np.histogram(np.clip(finite, 0.0, top), bins=bins, range=(0.0, top))
     return {"edges": [round(float(e), 4) for e in edges], "counts": [int(c) for c in counts]}
 
 
@@ -633,11 +744,46 @@ def episode_detail(handle: DatasetHandle, episode: int) -> dict[str, Any]:
             })
     payload["videos"] = videos
     payload["video"] = videos[0]["url"] if videos else None
+    payload["criteria"] = _criteria_rows(handle, score)
+    payload["severity"] = score.severity
     payload["task"] = handle.task
     payload["semanticDetail"] = handle.semantic.get(episode)
     payload["humanDiscarded"] = episode in handle.discarded
     payload["neighbours"] = _neighbours(sorted(handle.measures), episode)
     return clean(payload)
+
+
+def _criteria_rows(handle: DatasetHandle, score: EpisodeScore) -> list[dict[str, Any]]:
+    """The per-criterion audit trail, in physical units, worst first.
+
+    The reason list names only what condemned an episode, so an accepted one
+    shows nothing and there is no way to see how close it came. This is the same
+    evidence for every episode: the measured value beside the two anchors it was
+    judged against, and what the criterion cost.
+    """
+    profile = handle.profile
+    if handle.mode != "absolute" or profile is None:
+        return []
+    rows = []
+    for criterion in profile.active():
+        entry = score.terms.get(criterion.quantity)
+        if entry is None:
+            continue
+        rows.append(clean({
+            "quantity": criterion.quantity,
+            "label": criterion.label or criterion.quantity,
+            "unit": criterion.unit,
+            "value": entry.get("value"),
+            "good": criterion.good,
+            "bad": criterion.bad,
+            "u": entry.get("u"),
+            "p": entry.get("p"),
+            "cost": (entry.get("cost") or 0.0) * criterion.weight,
+            "weight": criterion.weight,
+            "action": criterion.action,
+        }))
+    rows.sort(key=lambda r: (r["cost"] if r["cost"] is not None else -1), reverse=True)
+    return rows
 
 
 def _neighbours(order: list[int], episode: int) -> dict[str, int | None]:

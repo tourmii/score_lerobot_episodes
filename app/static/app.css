@@ -204,6 +204,22 @@ details.panel > summary:hover { background: var(--panel-2); }
 details.panel > summary h2 { margin: 0; }
 details.panel > summary .right { margin-left: auto; display: flex; align-items: center; gap: 8px; }
 .panel-body { padding: 2px 15px 14px; }
+
+/* A lighter collapsible for sections already inside a card, where the panel
+   padding above would indent the content away from its siblings. */
+details.collapse > summary {
+  display: flex; align-items: center; gap: 9px;
+  cursor: pointer; list-style: none; border-radius: 6px;
+}
+details.collapse > summary::-webkit-details-marker { display: none; }
+details.collapse > summary::before {
+  content: '\25b8'; color: var(--muted); font-size: 9px; transition: transform .15s; flex: none;
+}
+details.collapse[open] > summary::before { transform: rotate(90deg); }
+details.collapse > summary h2 { margin: 0; }
+details.collapse > summary .right { margin-left: auto; text-transform: none; letter-spacing: 0; }
+details.collapse > summary:hover h2 { color: var(--fg); }
+.collapse-body { padding-top: 8px; }
 .ghost {
   width: auto; padding: 3px 9px; font-size: 11.5px; border-radius: 6px;
   background: var(--bg-2); color: var(--muted);

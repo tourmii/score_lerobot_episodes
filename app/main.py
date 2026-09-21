@@ -8,7 +8,11 @@ The API::
     POST   /api/datasets/{id}/analyze             {useVideo, workers} -> job
     POST   /api/datasets/{id}/calibrate           {loPct, hiPct} -> refit ranges
     PUT    /api/datasets/{id}/policy              {mode, weights, threshold, minimums}
-    POST   /api/datasets/{id}/semantic            {baseUrl, model, workers} -> job
+    POST   /api/datasets/{id}/profile/fit         {goodSigma, badSigma, taskDuration}
+    POST   /api/datasets/{id}/profile             {profile} -> adopt frozen anchors
+    GET    /api/datasets/{id}/profile.json        the anchors, to reuse elsewhere
+    GET    /api/datasets/{id}/drift               this batch against those anchors
+    POST   /api/datasets/{id}/semantic            {baseUrl, model, apiKey?, workers} -> job
     GET    /api/datasets/{id}/episodes            table rows
     GET    /api/datasets/{id}/episodes/{ep}       chart payload + detail
     GET    /api/datasets/{id}/episodes/{ep}/video range-streamed mp4
@@ -79,9 +83,25 @@ class PolicyBody(BaseModel):
     rules: list[dict[str, Any]] | None = None
 
 
+class ProfileFitBody(BaseModel):
+    goodSigma: float = Field(default=1.0, gt=0.0, le=10.0)
+    badSigma: float = Field(default=4.0, gt=0.0, le=20.0)
+    taskDuration: float | None = Field(default=None, gt=0.0)
+
+
+class ProfileBody(BaseModel):
+    #: A whole ``QualityProfile.to_dict()``, as written by ``profile.json``.
+    profile: dict[str, Any]
+    source: str | None = None
+
+
 class SemanticBody(BaseModel):
     baseUrl: str | None = None
     model: str | None = None
+    #: For a hosted endpoint.  Absent or blank means "not set": the request is
+    #: made without one, which is what a local vLLM server expects.  It is never
+    #: stored on the dataset or returned by any route.
+    apiKey: str | None = None
     workers: int = Field(default=4, ge=1, le=32)
     task: str | None = None
     maxFrames: int = Field(default=0, ge=0)
@@ -187,14 +207,24 @@ def set_policy(dataset_id: str, body: PolicyBody) -> dict[str, Any]:
         if unknown:
             raise HTTPException(400, f"unknown metric families: {sorted(unknown)}")
         handle.weights.update({k: float(v) for k, v in body.weights.items()})
+    if body.mode is not None:
+        if body.mode not in ("absolute", "rules", "gate", "weighted"):
+            raise HTTPException(
+                400, "mode must be 'absolute', 'rules', 'gate' or 'weighted'")
+        if body.mode == "absolute" and handle.profile is None:
+            raise HTTPException(409, "no profile on this dataset; fit or upload one first")
+        handle.mode = body.mode
     if body.threshold is not None:
-        handle.threshold = float(body.threshold)
+        # The two thresholds are different quantities — a rank inside this batch
+        # and a probability that no criterion is violated — so the slider writes
+        # to whichever the active mode reads.  Sharing one field would silently
+        # move the bar every time the mode changed.
+        if handle.mode == "absolute" and handle.profile is not None:
+            handle.profile.threshold = float(body.threshold)
+        else:
+            handle.threshold = float(body.threshold)
     if body.minimums is not None:
         handle.minimums = {k: float(v) for k, v in body.minimums.items()}
-    if body.mode is not None:
-        if body.mode not in ("rules", "gate", "weighted"):
-            raise HTTPException(400, "mode must be 'rules', 'gate' or 'weighted'")
-        handle.mode = body.mode
     if body.aggregate is not None:
         if body.aggregate not in ("geometric", "arithmetic"):
             raise HTTPException(400, "aggregate must be 'geometric' or 'arithmetic'")
@@ -215,12 +245,50 @@ def set_policy(dataset_id: str, body: PolicyBody) -> dict[str, Any]:
     return overview(handle)
 
 
+@app.post("/api/datasets/{dataset_id}/profile/fit")
+def fit_profile(dataset_id: str, body: ProfileFitBody) -> dict[str, Any]:
+    handle = _analyzed(dataset_id)
+    service.fit_profile(handle, body.goodSigma, body.badSigma, body.taskDuration)
+    return overview(handle)
+
+
+@app.post("/api/datasets/{dataset_id}/profile")
+def adopt_profile(dataset_id: str, body: ProfileBody) -> dict[str, Any]:
+    handle = _analyzed(dataset_id)
+    try:
+        service.load_profile(handle, body.profile, body.source or "uploaded")
+    except (TypeError, ValueError, KeyError) as exc:
+        raise HTTPException(400, f"not a usable profile: {exc}") from None
+    return overview(handle)
+
+
+@app.get("/api/datasets/{dataset_id}/profile.json")
+def download_profile(dataset_id: str) -> JSONResponse:
+    handle = _dataset(dataset_id)
+    if handle.profile is None:
+        raise HTTPException(404, "this dataset has no profile yet")
+    return JSONResponse(
+        handle.profile.to_dict(),
+        headers={"Content-Disposition":
+                 f'attachment; filename="{handle.name}.profile.json"'},
+    )
+
+
+@app.get("/api/datasets/{dataset_id}/drift")
+def dataset_drift(dataset_id: str) -> list[dict[str, Any]]:
+    handle = _analyzed(dataset_id)
+    if handle.profile is None:
+        raise HTTPException(409, "this dataset has no profile yet")
+    return service.drift(handle)
+
+
 @app.post("/api/datasets/{dataset_id}/semantic")
 def semantic(dataset_id: str, body: SemanticBody) -> dict[str, Any]:
     handle = _dataset(dataset_id)
     try:
         job = service.run_semantic(
-            handle, base_url=body.baseUrl, model=body.model, workers=body.workers,
+            handle, base_url=body.baseUrl, model=body.model,
+            api_key=(body.apiKey or "").strip() or None, workers=body.workers,
             task=body.task, max_frames=body.maxFrames,
             inline_media=body.inlineMedia, only=body.only,
         )
@@ -300,8 +368,15 @@ def export_json(dataset_id: str, decision: str = Query("accept")) -> JSONRespons
         "decision": sorted(wanted),
         "count": len(episodes),
         "episodes": episodes,
-        "weights": handle.weights,
-        "threshold": handle.threshold,
+        "mode": handle.mode,
+        # The export has to carry the bar that produced it, or the accepted list
+        # cannot be reproduced later.  In absolute mode that is the whole profile:
+        # the threshold alone means nothing without the anchors it was applied to.
+        **({"profile": handle.profile.to_dict(),
+            "profileSource": handle.profile_source or "fitted on this dataset",
+            "threshold": handle.profile.threshold}
+           if handle.mode == "absolute" and handle.profile
+           else {"weights": handle.weights, "threshold": handle.threshold}),
     })
 
 

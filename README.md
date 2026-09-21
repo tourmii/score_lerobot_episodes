@@ -143,8 +143,12 @@ Useful flags (`--help` for the full list):
 | `--no-video` | skip the video family (much faster first pass) |
 | `--workers N` | parallel episodes |
 | `--lo-pct` / `--hi-pct` | percentiles bounding each fitted range (default 5 / 95) |
-| `--mode` | decision rule: `gate`, `rules` (per-unit limits) or `weighted` |
-| `--threshold` | accept threshold for `gate` / `weighted` (default 0.35) |
+| `--mode` | decision rule: `absolute` (the default — one threshold, physical anchors), `gate`, `rules` (per-unit limits) or `weighted` |
+| `--profile FILE` | absolute mode: load anchors and do not refit — what makes one threshold transfer between datasets |
+| `--fit-profile OUT` | fit the anchors on this dataset and write them out. Run once, on a batch you trust |
+| `--threshold` | accept threshold (0.5 for `absolute`, 0.35 for `gate` / `weighted`) |
+| `--api-key` | credential for a hosted semantic endpoint (`COSMOS_API_KEY`). Leave it off for a local vLLM server |
+| `--drift` | report how far this dataset sits outside the loaded anchors |
 | `--html [N]` | render the synchronised visualisation for the N worst episodes |
 
 An equivalent console entry point is installed as `measure-dataset`.
@@ -195,6 +199,10 @@ python scripts/measure_dataset.py pickup_20260628_150622 \
   --task "put the teddy bear in the box"
 ```
 
+A hosted endpoint instead of a local server takes `--api-key` (or
+`COSMOS_API_KEY`). Leave it off for local vLLM: blank means no credential is
+sent at all, which is what that server expects.
+
 Or run it from the web app once the server is reachable
 (`POST /api/datasets/{id}/semantic`). `COSMOS_BASE_URL` and `COSMOS_MODEL`
 supply the endpoint and model name if you prefer environment variables.
@@ -242,6 +250,7 @@ disagree with a threshold without re-deriving the metric.
 | document | what it covers |
 |---|---|
 | [`docs/architecture.md`](docs/architecture.md) | how the measure → normalize → decide layers fit together, and why they are split |
+| [`docs/absolute_scoring.md`](docs/absolute_scoring.md) | one threshold across every dataset: physical anchors, noisy-OR, drift |
 | [`docs/app.md`](docs/app.md) | the web app: API, views, workflow, caching |
 
 ---
@@ -255,6 +264,7 @@ score_lerobot_episodes/
 │   │   ├── signals.py        # load parquet, mask dead channels, differentiate
 │   │   ├── measure.py        # raw physical quantities + flags (no thresholds)
 │   │   ├── normalize.py      # ranges fitted to your data → accept/review/reject
+│   │   ├── profile.py        # absolute anchors in physical units → one threshold
 │   │   ├── semantic.py       # Stage 2: Cosmos-Reason task-success gate
 │   │   ├── visualize.py      # standalone HTML page, burned-in overlay mp4
 │   │   ├── cli.py            # batch entry point (measure-dataset)

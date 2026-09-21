@@ -4,7 +4,9 @@ Four layers, each usable on its own:
 
 ``signals``   load an episode, mask the dead channels, differentiate once.
 ``measure``   raw physical quantities and boolean flags.  No thresholds.
-``normalize`` map onto ``[0, 1]`` against a fitted calibration, then decide.
+``normalize`` map onto ``[0, 1]`` against a batch-fitted calibration, then decide.
+``profile``   score against absolute anchors in physical units — one threshold,
+              frozen once, transferable between datasets.
 ``semantic``  did the episode actually achieve its task?  (vision-language model)
 ``visualize`` play the measured signals alongside the episode video.
 
@@ -68,6 +70,22 @@ from .normalize import (
     score_timing,
     score_video,
 )
+from .profile import (
+    ABSOLUTE_CRITERIA,
+    Criterion,
+    DEFAULT_CRITERIA,
+    PLATFORM_CRITERIA,
+    QualityProfile,
+    combine_cost,
+    combine_noisy_or,
+    decide_absolute,
+    drift_report,
+    format_drift,
+    penalties,
+    quantity_value,
+    score_episode_absolute,
+    smoothstep,
+)
 from .signals import (
     ARM_TOKENS,
     BODY_TOKENS,
@@ -98,6 +116,11 @@ __all__ = [
     "score_smoothness", "score_acceleration", "score_contact", "score_timing",
     "score_video", "ramp", "gauss_asymmetric", "exp_decay", "robust_z",
     "DEFAULT_BRACKETS", "DEFAULT_WEIGHTS",
+    # profile (absolute scoring)
+    "QualityProfile", "Criterion", "score_episode_absolute", "decide_absolute",
+    "penalties", "quantity_value", "combine_noisy_or", "combine_cost", "smoothstep",
+    "drift_report", "format_drift",
+    "DEFAULT_CRITERIA", "ABSOLUTE_CRITERIA", "PLATFORM_CRITERIA",
     # optional layers, imported lazily by __getattr__
     "SemanticFilter", "SemanticVerdict", "tasks_from_meta", "default_task",
     "render_episode_html", "render_index_html", "render_overlay_video",

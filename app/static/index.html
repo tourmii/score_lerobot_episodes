@@ -59,11 +59,12 @@
           <h2>decision</h2>
           <label class="row"><span>rule</span>
             <select id="mode">
+              <option value="absolute">one threshold, physical anchors</option>
               <option value="gate">every family must pass</option>
               <option value="weighted">weighted mean must pass</option>
               <option value="rules">limits per quantity</option>
             </select></label>
-          <label class="row"><span>combine</span>
+          <label class="row" id="aggregateRow"><span>combine</span>
             <select id="aggregate">
               <option value="geometric">geometric — a collapse cannot hide</option>
               <option value="arithmetic">arithmetic — fully compensatory</option>
@@ -73,15 +74,33 @@
             <b class="mono" id="thresholdValue">0.35</b></label>
           <div class="hint" id="modeNote"></div>
 
-          <h2 style="margin-top:14px">weights <span class="sub" id="weightsNote"></span></h2>
-          <div id="weightSliders"></div>
-
-          <div class="row two">
-            <label><span class="sub">p-low</span><input type="number" id="loPct" value="5" min="0" max="49" step="1"></label>
-            <label><span class="sub">p-high</span><input type="number" id="hiPct" value="95" min="51" max="100" step="1"></label>
+          <div id="profileBlock" hidden>
+            <div class="hint" id="profileNote"></div>
+            <div class="row two">
+              <label><span class="sub">good σ</span><input type="number" id="goodSigma" value="1" min="0.2" max="10" step="0.1"></label>
+              <label><span class="sub">bad σ</span><input type="number" id="badSigma" value="4" min="0.5" max="20" step="0.5"></label>
+            </div>
+            <label class="row"><span>task s</span>
+              <input type="number" id="taskDuration" min="0.1" step="0.1" placeholder="median of this batch"></label>
+            <button id="fitProfileBtn">refit anchors to this dataset</button>
+            <div class="row two">
+              <button id="downloadProfileBtn" class="ghost">download profile</button>
+              <button id="uploadProfileBtn" class="ghost">load profile…</button>
+            </div>
+            <input type="file" id="profileFile" accept="application/json,.json" hidden>
           </div>
-          <button id="refitBtn">refit ranges to this dataset</button>
-          <div class="hint" id="calibNote"></div>
+
+          <div id="weightBlock">
+            <h2 style="margin-top:14px">weights <span class="sub" id="weightsNote"></span></h2>
+            <div id="weightSliders"></div>
+
+            <div class="row two">
+              <label><span class="sub">p-low</span><input type="number" id="loPct" value="5" min="0" max="49" step="1"></label>
+              <label><span class="sub">p-high</span><input type="number" id="hiPct" value="95" min="51" max="100" step="1"></label>
+            </div>
+            <button id="refitBtn">refit ranges to this dataset</button>
+            <div class="hint" id="calibNote"></div>
+          </div>
         </section>
 
         <section id="semanticBlock" hidden>
@@ -90,6 +109,11 @@
             vision-language model — the one thing kinematics cannot see.</div>
           <input type="text" id="semanticUrl" placeholder="http://localhost:8000/v1">
           <input type="text" id="semanticModel" placeholder="nvidia/Cosmos-Reason2-8B">
+          <input type="password" id="semanticKey" autocomplete="off"
+                 placeholder="api key — leave blank for a local server">
+          <div class="hint">The key is sent with this request only: it is never
+            written to <code>.quality_app/</code> and never comes back from the
+            API. Blank means no credential is sent at all.</div>
           <button id="semanticBtn">judge every episode</button>
           <div class="progress" id="semanticProgress" hidden>
             <div class="progress-bar"><i></i></div>
